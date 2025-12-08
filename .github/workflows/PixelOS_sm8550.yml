@@ -54,4 +54,4 @@ jobs:
     - name: Create GitHub Release
       run: |
         cd ${GITHUB_WORKSPACE}
-        gh release create "$REL_NAME" --title "$REL_NAME" --notes "" ksu.zip ksu-next.zip ksu-next-susfs.zip
+        gh release create "$REL_NAME" --title "$REL_NAME" --notes "" ksu.zip ksu-next.zip
