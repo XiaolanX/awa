@@ -57,20 +57,36 @@ jobs:
 
     - name: Clone Kernel Source
       run: |
-        echo "克隆内核源码..."
+        echo "清理旧的构建空间..."
         rm -rf kernel_workspace
         mkdir -p kernel_workspace
-        
-        # 克隆内核源码
-        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel_workspace/kernel/kernel/oplus_cpu
+        cd kernel_workspace
+
+        echo "正在克隆内核主源码 (sixteen-qpr1)..."
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git \
-            --depth=1 -b sixteen-qpr1 kernel_workspace/kernel
+            --depth=1 -b sixteen-qpr1 kernel
         
-        if [ ! -d "kernel_workspace/kernel" ]; then
+        if [ ! -d "kernel" ]; then
             echo "❌ 内核源码克隆失败"
             exit 1
         fi
-        echo "✅ 内核源码克隆成功"
+
+        echo "正在克隆一加特有模块..."
+        # 注意：对于 SM8550，模块通常需要克隆到内核根目录下的特定位置
+        # 根据你之前的报错，我们直接把它拉到 kernel/kernel/下对齐路径
+        mkdir -p kernel/kernel
+        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git \
+            --depth=1 -b sixteen-qpr1 kernel/kernel/oplus_cpu
+
+        echo "✅ 源码与模块对齐完成"
+        
+        # 验证一下刚才报错的 Kconfig 文件是否存在
+        if [ -f "kernel/kernel/oplus_cpu/thermal/Kconfig" ]; then
+            echo "✨ 核心食材已就位: kernel/oplus_cpu/thermal/Kconfig"
+        else
+            echo "⚠️ 警告: 模块路径可能仍不正确，尝试搜索 Kconfig 位置..."
+            find kernel -name "Kconfig" | grep "thermal" | head -n 5
+        fi
         
         # 检查GKI相关配置
         cd kernel_workspace/kernel
