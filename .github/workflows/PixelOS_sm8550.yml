@@ -40,7 +40,12 @@ jobs:
         echo "安装内核构建依赖工具..."
         sudo apt-get update
         sudo apt-get install -y build-essential libssl-dev bc kmod \
-        flex bison libelf-dev git ccache aria2 patch rsync
+        flex bison libelf-dev git ccache aria2 patch rsync \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu  # 添加ARM64交叉编译器
+        
+        # 验证交叉编译器安装
+        echo "验证交叉编译器..."
+        aarch64-linux-gnu-gcc --version || echo "⚠️ 交叉编译器可能未正确安装"
         echo "✅ 构建依赖安装完成"
 
     - name: Clone Kernel and Dependencies
@@ -161,6 +166,10 @@ jobs:
         find . -name "*.patch" | head -5 | while read patch; do
             echo "发现补丁: $patch"
         done || echo "未找到补丁文件"
+        
+        # 检查交叉编译器
+        echo "4. 验证交叉编译器..."
+        which aarch64-linux-gnu-gcc && echo "✅ 交叉编译器已安装" || echo "❌ 交叉编译器未找到"
 
     - name: Apply SUSFS Patches
       if: inputs.enable_susfs
@@ -279,35 +288,6 @@ jobs:
         echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
         echo "✅ 发布名称设置为: $REL_NAME"
 
-    - name: Setup Cross Compilation Environment
-  run: |
-    echo "设置交叉编译环境..."
-    
-    # 安装必要的工具链
-    sudo apt-get update
-    sudo apt-get install -y \
-        gcc-12-aarch64-linux-gnu \
-        g++-12-aarch64-linux-gnu \
-        binutils-aarch64-linux-gnu \
-        libc6-dev-arm64-cross \
-        libssl-dev \
-        libncurses-dev \
-        bison flex \
-        bc kmod cpio
-    
-    # 创建符号链接确保版本兼容
-    sudo update-alternatives --install /usr/bin/aarch64-linux-gnu-gcc \
-        aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-gnu-gcc-12 100
-    sudo update-alternatives --install /usr/bin/aarch64-linux-gnu-g++ \
-        aarch64-linux-gnu-g++ /usr/bin/aarch64-linux-gnu-g++-12 100
-    
-    # 设置环境变量
-    echo "CC=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-    echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
-    echo "ARCH=arm64" >> $GITHUB_ENV
-    
-    echo "✅ 交叉编译环境设置完成"
-
     - name: Build Kernel with Standard Method
       if: env.KERNEL_BUILD_SYSTEM == 'makefile'
       run: |
@@ -317,7 +297,12 @@ jobs:
         # 设置构建环境
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
+        export CC=aarch64-linux-gnu-gcc
         export SUBARCH=arm64
+        
+        # 验证编译器
+        echo "验证编译器..."
+        ${CROSS_COMPILE}gcc --version || { echo "❌ 编译器不可用"; exit 1; }
         
         # 配置内核
         make sm8550_defconfig
@@ -374,6 +359,12 @@ jobs:
         if [ "${{ env.KERNEL_BUILD_SYSTEM }}" = "makefile" ]; then
             export ARCH=arm64
             export CROSS_COMPILE=aarch64-linux-gnu-
+            export CC=aarch64-linux-gnu-gcc
+            
+            # 验证编译器
+            echo "验证编译器..."
+            ${CROSS_COMPILE}gcc --version || { echo "❌ 编译器不可用"; exit 1; }
+            
             make sm8550_defconfig
             make -j$(nproc) Image.gz-dtb
             mkdir -p ${GITHUB_WORKSPACE}/artifacts
