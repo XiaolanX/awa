@@ -39,9 +39,9 @@ jobs:
             python3 python3-pip cpio lz4 device-tree-compiler \
             rsync wget curl \
             clang-15 lld-15 llvm-15 llvm-15-dev \
-            dwarves  # 需要pahole工具
+            dwarves
         
-        # 设置LLVM 15工具链（GKI 2.0通常需要较新版本）
+        # 设置LLVM 15工具链
         sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
         sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-15 100
         sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-15 100
@@ -312,7 +312,7 @@ jobs:
         fi
         
         # 创建GKI 2.0版本信息
-        cat > "$PKG_DIR/version.txt" << EOF
+        cat > "$PKG_DIR/version.txt" << 'EOF'
 PixelOS GKI 2.0 Kernel for OnePlus 12R
 设备: SM8550
 构建时间: $(date)
@@ -362,12 +362,10 @@ EOF
         echo "ZIP_SIZE=$(stat -c%s "${GITHUB_WORKSPACE}/${ZIP_NAME}")" >> $GITHUB_ENV
         
         # 创建发布
-        if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
-            RELEASE_TAG="gki2-$(date +%Y%m%d)"
-            RELEASE_BODY="PixelOS GKI 2.0 Kernel for SM8550\nBuilt: $(date)\nGKI Version: ${{ env.GKI_VERSION }}"
-            
-            gh release create "$RELEASE_TAG" \
-                --title "PixelOS GKI 2.0 Kernel" \
-                --notes "$RELEASE_BODY" \
-                "${GITHUB_WORKSPACE}/${ZIP_NAME}" 2>/dev/null || echo "发布创建失败或已存在"
-        fi
+        RELEASE_TAG="gki2-$(date +%Y%m%d)"
+        RELEASE_BODY="PixelOS GKI 2.0 Kernel for SM8550\nBuilt: $(date)\nGKI Version: ${{ env.GKI_VERSION }}"
+        
+        gh release create "$RELEASE_TAG" \
+            --title "PixelOS GKI 2.0 Kernel" \
+            --notes "$RELEASE_BODY" \
+            "${GITHUB_WORKSPACE}/${ZIP_NAME}" 2>/dev/null || echo "发布创建失败或已存在"
