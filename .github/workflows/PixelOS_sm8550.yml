@@ -249,11 +249,3 @@ jobs:
         
         # 创建发布说明
         RELEASE_NOTES="构建时间: $(date)
-构建特性:
-- SUSFS 支持: ${{ inputs.enable_susfs }}
-- KPM 支持: ${{ inputs.enable_kpm }}
-- SUSFS 分支: ${{ inputs.susfs_branch }}
-- KPM 仓库: ${{ inputs.kpm_repo }}"
-        
-        gh release create "$REL_NAME" --title "$REL_NAME" --notes "$RELEASE_NOTES" $RELEASE_FILES
-        echo "✅ GitHub 发布创建完成"
