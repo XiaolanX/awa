@@ -28,6 +28,26 @@ jobs:
         REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
         echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
 
+    - name: Setup Build Environment
+      run: |
+        # 进入内核目录
+        cd kernel/oneplus/sm8550
+        
+        # 尝试1：检查 build_sm8550 是否是一个本地脚本
+        if [ -f "./build_sm8550" ]; then
+          echo "找到本地构建脚本，赋予执行权限并添加到PATH"
+          chmod +x ./build_sm8550
+          echo "$(pwd)" >> $GITHUB_PATH  # 将当前目录添加到GITHUB_PATH中，后续步骤自动可用[6](@ref)
+        
+        # 尝试2：如果它不是文件，可能是一个需要安装的工具，这里可以安装依赖
+        # 例如：sudo apt-get update && sudo apt-get install -y xxx
+        else
+          echo "错误：未找到 build_sm8550 脚本或可执行文件。"
+          echo "当前目录内容："
+          ls -la
+          exit 1  # 主动报错，停止工作流
+        fi
+
     - name: Build Kernel with ksu
       run: |
         cd kernel/oneplus/sm8550
