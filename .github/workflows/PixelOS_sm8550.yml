@@ -24,32 +24,25 @@ jobs:
         # 安装编译 GKI 必备的工具
         pip3 install setuptools
 
-    - name: Clone GKI Source
+    - name: Surgical Integration (SUSFS & KPM)
       run: |
-        # 克隆主内核 (假设为 5.15 分支)
-        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/sm8550
-        # 克隆 SUSFS 补丁
-        git clone https://gitlab.com/khiz_zy/susfs_patches.git --depth=1 susfs_src
-
-    - name: Patching SUSFS & KPM
-      run: |
+        # 进入内核目录
         cd kernel/sm8550
         
-        echo "--- 正在为 GKI 注入 SUSFS ---"
-        # 应用 5.15 的内核补丁
+        echo "--- 正在手术：注入 SUSFS ---"
+        # 使用上一步下载解压好的补丁 (路径现在是 ../../susfs_src)
+        # 针对 5.15 内核应用补丁
         cp ../../susfs_src/Kernel_Patches/5.15/* ./
-        patch -p1 < 5.15_add_susfs_in_kernel.patch || echo "警告：部分补丁需手动确认"
-
-        # 注入 SUSFS 相关的头文件
-        cp ../../susfs_src/Kernel_Patches/Include/linux/* ./include/linux/
+        patch -p1 < 5.15_add_susfs_in_kernel.patch || echo "补丁有冲突，请检查内核源码版本"
         
-        echo "--- 正在注入 KPM ---"
-        # 将 KPM 源码集成到内核树
-        git clone https://github.com/rifsxd/KPM.git --depth=1 ../kpm_src
+        # 复制必要的头文件（这步很重要，不然编译会报找不到 header）
+        cp ../../susfs_src/Kernel_Patches/Include/linux/* ./include/linux/
+
+        echo "--- 正在手术：注入 KPM ---"
+        # 同样建议用 curl 下载 KPM 源码，避免 git 报错
         mkdir -p drivers/kpm
-        cp -r ../kpm_src/kpm/* drivers/kpm/
-        # 修改 Makefile 使其参与编译
-        echo "obj-y += kpm/" >> drivers/Makefile
+        curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o drivers/kpm/Kbuild
+        # 注意：这里需要 KPM 的 .c 源文件，如果还是 clone 报错，建议把 KPM 源码直接放在你自己的 GitHub 仓库里
 
     - name: Configure GKI Defconfig
       run: |
