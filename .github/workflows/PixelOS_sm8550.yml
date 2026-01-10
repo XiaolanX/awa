@@ -17,14 +17,15 @@ jobs:
     - name: Clone Kernel and Dependencies
       run: |
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
-        git clone https://github.com/Plus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
+        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
     
     - name: Setup release name
       run: |
         rm -rf ${GITHUB_WORKSPACE}/*.zip
         cd kernel/oneplus/sm8550
         SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
-        REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
+        # 发布名称中增加SUSFS+KPM标识，便于区分版本
+        REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")-sukisu-susfs-kpm"
         echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
 
     - name: Build Kernel with ksu
@@ -43,51 +44,18 @@ jobs:
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
 
-    - name: Build Kernel with sukisu
+    - name: Build Kernel with sukisu (SUSFS + KPM)
       run: |
         cd kernel/oneplus/sm8550
-        # 配置内核以启用SUSFS和KPM支持
-        # 尝试常见的defconfig文件路径
-        DEFCONFIG_PATHS=(
-          "arch/arm64/configs/oneplus_sm8550_defconfig"
-          "arch/arm64/configs/vendor/sm8550_defconfig"
-          "arch/arm64/configs/sm8550_defconfig"
-        )
-        for DEFCONFIG in "${DEFCONFIG_PATHS[@]}"; do
-          if [ -f "$DEFCONFIG" ]; then
-            echo "配置defconfig文件: $DEFCONFIG"
-            # 确保配置选项存在并设置为y
-            # KPROBES是SUSFS的依赖[8](@ref)
-            echo "CONFIG_KPROBES=y" >> "$DEFCONFIG"
-            echo "CONFIG_HAVE_KPROBES=y" >> "$DEFCONFIG"
-            echo "CONFIG_KPROBE_EVENTS=y" >> "$DEFCONFIG"
-            # 启用SUSFS相关配置[8](@ref)
-            echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SPOOF_PROC_CMDLINE=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$DEFCONFIG"
-            echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$DEFCONFIG"
-            # KPM支持是SukiSU Ultra的核心特性[6,7](@ref)
-            echo "CONFIG_KSU_KPM=y" >> "$DEFCONFIG"
-            break
-          fi
-        done
-        build_sm8550 --clean --sukisu
-        mv kernel.zip ${GITHUB_WORKSPACE}/sukisu.zip
+        # 核心修改：添加--susfs和--kpm参数启用SUSFS和KPM支持
+        build_sm8550 --clean --sukisu --susfs --kpm
+        # 重命名压缩包，明确标识包含SUSFS和KPM
+        mv kernel.zip ${GITHUB_WORKSPACE}/sukisu-susfs-kpm.zip
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
 
     - name: Create GitHub Release
       run: |
         cd ${GITHUB_WORKSPACE}
-        gh release create "$REL_NAME" --title "$REL_NAME" --notes "" ksu.zip ksu-next.zip sukisu.zip
+        # 同步更新发布的压缩包名称
+        gh release create "$REL_NAME" --title "$REL_NAME" --notes "Sukisu版本已启用SUSFS和KPM支持" ksu.zip ksu-next.zip sukisu-susfs-kpm.zip
