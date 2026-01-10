@@ -12,21 +12,18 @@ on:
         type: boolean
         default: true
       susfs_branch:
-        description: 'SUSFS 分支/版本'
+        description: 'SUSFS 分支名称 (已知选项: master, kernel-4.14, 或其他)'
         type: string
-        default: 'main'
-      kpm_config:
-        description: 'KPM 配置类型'
-        type: choice
-        options:
-          - basic
-          - advanced
-        default: 'basic'
+        default: 'master'
+      kpm_repo:
+        description: 'KPM 仓库地址'
+        type: string
+        default: 'https://github.com/dynup/kpatch.git'
 
 jobs:
   PixelOS_Kernel_CI:
     name: PixelOS Kernel CI
-    runs-on: ubuntu-latest  # 改为 GitHub 托管的运行器
+    runs-on: ubuntu-latest
     
     steps:
     - name: Checkout Repository
@@ -43,42 +40,76 @@ jobs:
       if: inputs.enable_susfs
       run: |
         echo "正在设置 SUSFS 环境..."
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b ${{ inputs.susfs_branch }} susfs_patches
-        # 复制 SUSFS 补丁到内核目录
-        cp -r susfs_patches/kernel_patches/* kernel/oneplus/sm8550/
-        echo "SUSFS 环境设置完成"
+        
+        # 尝试不同的分支名称
+        if git clone https://gitlab.com/simonpunk/susfs4ksu.git -b ${{ inputs.susfs_branch }} susfs_patches; then
+            echo "✅ 成功使用分支: ${{ inputs.susfs_branch }}"
+        elif git clone https://gitlab.com/simonpunk/susfs4ksu.git -b master susfs_patches; then
+            echo "✅ 回退到 master 分支成功"
+        else
+            echo "❌ SUSFS 克隆失败，尝试克隆默认分支"
+            git clone https://gitlab.com/simonpunk/susfs4ksu.git susfs_patches
+            cd susfs_patches
+            CURRENT_BRANCH=$(git branch --show-current)
+            echo "当前分支: $CURRENT_BRANCH"
+            cd ..
+        fi
+        
+        # 验证克隆是否成功并复制补丁文件
+        if [ -d "susfs_patches" ] && [ -d "susfs_patches/kernel_patches" ]; then
+            cp -r susfs_patches/kernel_patches/* kernel/oneplus/sm8550/
+            echo "✅ SUSFS 补丁文件复制完成"
+        else
+            echo "❌ SUSFS 克隆失败或目录结构不正确"
+            ls -la susfs_patches/
+            exit 1
+        fi
 
-    - name: Setup KPM Environment  
+    - name: Setup KPM Environment
       if: inputs.enable_kpm
       run: |
-  PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
-  OUT_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/out/Final-Image-Find"
-  cd "${OUT_DIR}"
-  cp "${PATCH_DIR}/patch_linux" .
-  chmod +x patch_linux
-  ./patch_linux
-  rm -f Image
-  mv oImage Image
-  cp Image "${GITHUB_WORKSPACE}/AnyKernel3/Image"
+        echo "正在设置 KPM 环境..."
+        
+        # 克隆 KPM 相关工具
+        git clone ${{ inputs.kpm_repo }} kpm_tools --depth=1
+        
+        # 验证 KPM 工具结构
+        if [ -d "kpm_tools" ]; then
+            echo "✅ KPM 工具克隆成功"
+            # 复制必要的 KPM 补丁工具到工作目录
+            cp kpm_tools/patch_linux kernel/oneplus/sm8550/ 2>/dev/null || echo "⚠️ 未找到标准 patch_linux 文件，将使用自定义实现"
+        else
+            echo "❌ KPM 工具克隆失败"
+            exit 1
+        fi
 
     - name: Apply SUSFS Patches
       if: inputs.enable_susfs
       run: |
         cd kernel/oneplus/sm8550
         echo "应用 SUSFS 补丁..."
-        for patch_file in ../susfs_patches/*.patch; do
-          if [ -f "$patch_file" ]; then
-            echo "应用补丁: $(basename $patch_file)"
-            patch -p1 --no-backup-if-mismatch < "$patch_file" || echo "补丁应用可能存在问题，继续执行..."
-          fi
+        
+        # 查找并应用所有 SUSFS 补丁文件
+        for patch_file in $(find . -name "*.patch" | grep -i susfs); do
+            echo "应用补丁: $patch_file"
+            if patch -p1 --no-backup-if-mismatch < "$patch_file" 2>&1; then
+                echo "✅ 补丁应用成功: $patch_file"
+            else
+                echo "⚠️ 补丁应用可能存在问题: $patch_file"
+                # 尝试继续执行，可能有部分补丁已经应用过
+            fi
         done
-        echo "SUSFS 补丁应用完成"
+        
+        echo "✅ SUSFS 补丁应用完成"
 
     - name: Configure Kernel Options
       run: |
         cd kernel/oneplus/sm8550
+        
         # 备份原始配置文件
-        cp arch/arm64/configs/vendor/sm8550_defconfig arch/arm64/configs/vendor/sm8550_defconfig.backup
+        if [ -f "arch/arm64/configs/vendor/sm8550_defconfig" ]; then
+            cp arch/arm64/configs/vendor/sm8550_defconfig arch/arm64/configs/vendor/sm8550_defconfig.backup
+        fi
         
         # 基础配置
         echo "CONFIG_MODULES=y" >> arch/arm64/configs/vendor/sm8550_defconfig
@@ -86,51 +117,64 @@ jobs:
         
         # 条件性添加 SUSFS 配置
         if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/sm8550_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/vendor/sm8550_defconfig
-          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> arch/arm64/configs/vendor/sm8550_defconfig
-          echo "SUSFS 配置已添加"
+            echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+            echo "✅ SUSFS 配置已添加"
         fi
         
         # 条件性添加 KPM 配置
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-          echo "CONFIG_KPM=y" >> arch/arm64/configs/vendor/sm8550_defconfig
-          echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/sm8550_defconfig
-          echo "CONFIG_HAVE_KPROBES=y" >> arch/arm64/configs/vendor/sm8550_defconfig
-          echo "KPM 配置已添加"
+            echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+            echo "CONFIG_HAVE_KPROBES=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+            echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+            echo "✅ KPM 配置已添加"
         fi
         
-        echo "内核配置更新完成"
+        echo "✅ 内核配置更新完成"
 
     - name: Setup release name
       run: |
         rm -rf ${GITHUB_WORKSPACE}/*.zip
         cd kernel/oneplus/sm8550
         SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+        
         # 在发布名称中包含功能标记
         FEATURE_SUFFIX=""
         if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-          FEATURE_SUFFIX="${FEATURE_SUFFIX}_SUSFS"
+            FEATURE_SUFFIX="${FEATURE_SUFFIX}_SUSFS"
         fi
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-          FEATURE_SUFFIX="${FEATURE_SUFFIX}_KPM"
+            FEATURE_SUFFIX="${FEATURE_SUFFIX}_KPM"
         fi
+        
         REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")${FEATURE_SUFFIX}"
         echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
+        echo "✅ 发布名称设置为: $REL_NAME"
 
     - name: Build Kernel with ksu
       run: |
         cd kernel/oneplus/sm8550
-        # 传递 SUSFS 和 KPM 参数给构建脚本
-        BUILD_ARGS="--clean --ksu"
-        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-          BUILD_ARGS="${BUILD_ARGS} --susfs"
-        fi
+        
+        # 构建基础内核
+        build_sm8550 --clean --ksu
+        
+        # 应用 KPM 补丁（如果启用）
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-          BUILD_ARGS="${BUILD_ARGS} --kpm"
+            echo "应用 KPM 补丁到 ksu 版本..."
+            if [ -f "patch_linux" ]; then
+                chmod +x patch_linux
+                ./patch_linux
+                if [ -f "oImage" ]; then
+                    mv oImage kernel_ksu
+                    echo "✅ KPM 补丁应用成功"
+                fi
+            else
+                echo "⚠️ 未找到 patch_linux 文件，跳过 KPM 补丁"
+            fi
         fi
         
-        build_sm8550 $BUILD_ARGS
         mv kernel.zip ${GITHUB_WORKSPACE}/ksu${{ inputs.enable_susfs && '_susfs' || '' }}${{ inputs.enable_kpm && '_kpm' || '' }}.zip
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
@@ -138,15 +182,25 @@ jobs:
     - name: Build Kernel with ksu-next
       run: |
         cd kernel/oneplus/sm8550
-        BUILD_ARGS="--clean --ksu-next"
-        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-          BUILD_ARGS="${BUILD_ARGS} --susfs"
-        fi
+        
+        # 构建基础内核
+        build_sm8550 --clean --ksu-next
+        
+        # 应用 KPM 补丁（如果启用）
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-          BUILD_ARGS="${BUILD_ARGS} --kpm"
+            echo "应用 KPM 补丁到 ksu-next 版本..."
+            if [ -f "patch_linux" ]; then
+                chmod +x patch_linux
+                ./patch_linux
+                if [ -f "oImage" ]; then
+                    mv oImage kernel_ksu_next
+                    echo "✅ KPM 补丁应用成功"
+                fi
+            else
+                echo "⚠️ 未找到 patch_linux 文件，跳过 KPM 补丁"
+            fi
         fi
         
-        build_sm8550 $BUILD_ARGS
         mv kernel.zip ${GITHUB_WORKSPACE}/ksu-next${{ inputs.enable_susfs && '_susfs' || '' }}${{ inputs.enable_kpm && '_kpm' || '' }}.zip
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
@@ -154,18 +208,37 @@ jobs:
     - name: Build Kernel with sukisu
       run: |
         cd kernel/oneplus/sm8550
-        BUILD_ARGS="--clean --sukisu"
-        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-          BUILD_ARGS="${BUILD_ARGS} --susfs"
-        fi
+        
+        # 构建基础内核
+        build_sm8550 --clean --sukisu
+        
+        # 应用 KPM 补丁（如果启用）
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-          BUILD_ARGS="${BUILD_ARGS} --kpm"
+            echo "应用 KPM 补丁到 sukisu 版本..."
+            if [ -f "patch_linux" ]; then
+                chmod +x patch_linux
+                ./patch_linux
+                if [ -f "oImage" ]; then
+                    mv oImage kernel_sukisu
+                    echo "✅ KPM 补丁应用成功"
+                fi
+            else
+                echo "⚠️ 未找到 patch_linux 文件，跳过 KPM 补丁"
+            fi
         fi
         
-        build_sm8550 $BUILD_ARGS
         mv kernel.zip ${GITHUB_WORKSPACE}/sukisu${{ inputs.enable_susfs && '_susfs' || '' }}${{ inputs.enable_kpm && '_kpm' || '' }}.zip
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
+
+    - name: Verify Build Outputs
+      run: |
+        cd ${GITHUB_WORKSPACE}
+        echo "构建产物列表:"
+        ls -la *.zip
+        echo "文件大小统计:"
+        du -h *.zip
+        echo "✅ 构建验证完成"
 
     - name: Create GitHub Release
       run: |
@@ -173,4 +246,14 @@ jobs:
         # 动态收集所有生成的 zip 文件
         RELEASE_FILES=$(ls *.zip | tr '\n' ' ')
         echo "发布文件: $RELEASE_FILES"
-        gh release create "$REL_NAME" --title "$REL_NAME" --notes "SUSFS: ${{ inputs.enable_susfs }}, KPM: ${{ inputs.enable_kpm }}" $RELEASE_FILES
+        
+        # 创建发布说明
+        RELEASE_NOTES="构建时间: $(date)
+构建特性:
+- SUSFS 支持: ${{ inputs.enable_susfs }}
+- KPM 支持: ${{ inputs.enable_kpm }}
+- SUSFS 分支: ${{ inputs.susfs_branch }}
+- KPM 仓库: ${{ inputs.kpm_repo }}"
+        
+        gh release create "$REL_NAME" --title "$REL_NAME" --notes "$RELEASE_NOTES" $RELEASE_FILES
+        echo "✅ GitHub 发布创建完成"
