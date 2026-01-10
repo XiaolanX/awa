@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04 # 保留原代码的系统版本
+    runs-on: ubuntu-20.04 # 保留原代码的系统版本
     permissions:
       contents: write
 
@@ -112,9 +112,9 @@ jobs:
 
           zip -r oneplus-ace3-kernel.zip boot-ace3.img
 
-      # 保留原代码的产物上传逻辑
+      # 修复核心：将废弃的v3升级为v4，参数完全兼容
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: oneplus-ace3-kernel
           path: kernel/out/arch/arm64/boot/oneplus-ace3-kernel.zip
