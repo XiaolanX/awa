@@ -62,6 +62,7 @@ jobs:
         mkdir -p kernel_workspace
         
         # 克隆内核源码
+        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel_workspace/kernel/kernel/oplus_cpu
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git \
             --depth=1 -b sixteen-qpr1 kernel_workspace/kernel
         
