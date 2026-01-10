@@ -308,22 +308,6 @@ jobs:
         
         # 创建GKI 2.0版本信息
         cat > "$PKG_DIR/version.txt" << 'EOF'
-PixelOS GKI 2.0 Kernel for OnePlus 12R
-设备: SM8550
-构建时间: $(date)
-内核版本: $(grep "^VERSION\|^PATCHLEVEL\|^SUBLEVEL" Makefile 2>/dev/null | tr '\n' ' ')
-GKI版本: ${{ env.GKI_VERSION }}
-配置文件: gki_defconfig
-架构: arm64
-工具链: LLVM 15/Clang
-构建选项:
-  - 模块支持: 已启用
-  - KMI符号列表: 已启用
-  - 调试信息: 已启用
-功能特性:
-  - SUSFS: ${{ inputs.enable_susfs }}
-  - KPM: ${{ inputs.enable_kpm }}
-EOF
 
     - name: Package and Release
       run: |
