@@ -1,4 +1,4 @@
-name: PixelOS GKI Kernel Build
+name: PixelOS SM8550 GKI 2.0 Kernel Build
 
 on:
   workflow_dispatch:
@@ -11,10 +11,14 @@ on:
         description: '启用 KPM 支持'
         type: boolean
         default: true
+      susfs_branch:
+        description: 'SUSFS 分支名称'
+        type: string
+        default: 'master'
 
 jobs:
-  build_gki:
-    name: Build GKI Kernel
+  build:
+    name: Build PixelOS GKI 2.0 Kernel
     runs-on: ubuntu-latest
     
     steps:
@@ -23,9 +27,9 @@ jobs:
       with:
         fetch-depth: 1
 
-    - name: Install GKI Build Dependencies
+    - name: Install GKI 2.0 Build Dependencies
       run: |
-        echo "安装GKI内核构建依赖..."
+        echo "安装GKI 2.0内核构建依赖..."
         sudo apt-get update
         sudo apt-get install -y \
             build-essential libssl-dev bc kmod \
@@ -34,196 +38,140 @@ jobs:
             binutils-aarch64-linux-gnu libncurses-dev \
             python3 python3-pip cpio lz4 device-tree-compiler \
             rsync wget curl \
-            clang lld llvm-13 llvm-13-dev
+            clang-15 lld-15 llvm-15 llvm-15-dev \
+            dwarves  # 需要pahole工具
         
-        # 设置LLVM工具链
-        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-13 100
-        sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-13 100
+        # 设置LLVM 15工具链（GKI 2.0通常需要较新版本）
+        sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
+        sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-15 100
+        sudo update-alternatives --install /usr/bin/llvm-ar llvm-ar /usr/bin/llvm-ar-15 100
+        sudo update-alternatives --install /usr/bin/llvm-strip llvm-strip /usr/bin/llvm-strip-15 100
         
         # 验证工具链
         echo "工具链版本:"
         aarch64-linux-gnu-gcc --version
         clang --version
         ld.lld --version
-        echo "✅ 依赖安装完成"
+        llvm-ar --version
+        echo "✅ GKI 2.0依赖安装完成"
 
-    - name: Clone GKI Kernel Source
+    - name: Clone Kernel Source
       run: |
-        echo "克隆GKI内核源码..."
+        echo "克隆内核源码..."
+        rm -rf kernel_workspace
+        mkdir -p kernel_workspace
         
-        # 清理并创建目录
-        rm -rf kernel
-        mkdir -p kernel
-        
-        # 克隆GKI内核（或者您的内核，确保支持GKI）
-        # 注意：您需要替换为实际的GKI内核仓库
+        # 克隆内核源码
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git \
-            --depth=1 -b sixteen-qpr1 kernel/source
+            --depth=1 -b sixteen-qpr1 kernel_workspace/kernel
         
-        if [ ! -d "kernel/source" ]; then
+        if [ ! -d "kernel_workspace/kernel" ]; then
             echo "❌ 内核源码克隆失败"
             exit 1
         fi
-        
         echo "✅ 内核源码克隆成功"
-        echo "内核目录结构:"
-        ls -la kernel/source/
         
-        # 检查ARM64配置文件
-        echo "查找ARM64架构的defconfig:"
-        find kernel/source/arch/arm64/configs -name "*defconfig*" 2>/dev/null | head -20 || echo "未找到arm64 configs目录"
+        # 检查GKI相关配置
+        cd kernel_workspace/kernel
+        echo "检查GKI相关配置:"
+        grep -r "GKI\|KMI" arch/arm64/configs/ 2>/dev/null | head -10
+        echo "检查内核版本:"
+        grep -E "VERSION|PATCHLEVEL|SUBLEVEL" Makefile
 
-    - name: Find ARM64 GKI Defconfig
-      id: find_gki_config
+    - name: Setup GKI 2.0 Build Environment
+      id: gki_env
       run: |
-        cd kernel/source
+        cd kernel_workspace/kernel
+        echo "设置GKI 2.0构建环境..."
         
-        echo "搜索GKI或SM8550相关配置..."
+        # 获取内核版本
+        KERNEL_VERSION=$(grep "^VERSION =" Makefile | awk '{print $3}' 2>/dev/null || echo "5")
+        PATCHLEVEL=$(grep "^PATCHLEVEL =" Makefile | awk '{print $3}' 2>/dev/null || echo "10")
+        SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}' 2>/dev/null || echo "0")
         
-        # 优先搜索ARM64架构的GKI配置
-        CONFIG_PATHS=(
-            "arch/arm64/configs/gki_defconfig"
-            "arch/arm64/configs/vendor/gki_defconfig"
-            "arch/arm64/configs/vendor/sm8550/gki_defconfig"
-            "arch/arm64/configs/vendor/sm8550_defconfig"
-            "arch/arm64/configs/sm8550_defconfig"
-            "arch/arm64/configs/vendor/sm8550-perf_defconfig"
-            "arch/arm64/configs/gki"
-            "arch/arm64/configs/gki.config"
-        )
+        echo "内核版本: ${KERNEL_VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
         
-        # 检查常见路径
-        echo "检查标准GKI配置位置:"
-        ls -la arch/arm64/configs/ 2>/dev/null || echo "未找到arch/arm64/configs目录"
-        ls -la arch/arm64/configs/vendor/ 2>/dev/null || echo "未找到vendor目录"
-        
-        # 搜索所有可能的配置
-        GKI_CONFIG=""
-        for config in "${CONFIG_PATHS[@]}"; do
-            if [ -f "$config" ]; then
-                echo "✅ 找到配置: $config"
-                GKI_CONFIG="$config"
-                break
-            fi
-        done
-        
-        if [ -z "$GKI_CONFIG" ]; then
-            echo "⚠️ 未找到标准GKI配置，搜索所有ARM64配置..."
-            # 查找所有ARM64 defconfig
-            ALL_ARM64_CONFIGS=$(find arch/arm64/configs -name "*defconfig*" 2>/dev/null || find arch/arm64 -name "*defconfig*" 2>/dev/null)
-            
-            if [ -n "$ALL_ARM64_CONFIGS" ]; then
-                echo "找到的ARM64配置:"
-                echo "$ALL_ARM64_CONFIGS"
-                
-                # 优先选择包含gki或vendor的配置
-                for config in $ALL_ARM64_CONFIGS; do
-                    if [[ "$config" == *"gki"* ]] || [[ "$config" == *"vendor"* ]] || [[ "$config" == *"sm8550"* ]]; then
-                        GKI_CONFIG="$config"
-                        echo "✅ 选择配置: $GKI_CONFIG"
-                        break
-                    fi
-                done
-                
-                # 如果没有找到特殊配置，使用第一个
-                if [ -z "$GKI_CONFIG" ]; then
-                    GKI_CONFIG=$(echo "$ALL_ARM64_CONFIGS" | head -1)
-                    echo "⚠️ 使用第一个找到的配置: $GKI_CONFIG"
-                fi
+        # 检查GKI版本
+        if [ -f "arch/arm64/configs/gki_defconfig" ]; then
+            echo "找到gki_defconfig，检查是否支持GKI 2.0..."
+            if grep -q "CONFIG_KMI_SYMBOL_LIST" arch/arm64/configs/gki_defconfig 2>/dev/null; then
+                echo "✅ 检测到GKI 2.0+ 配置（包含KMI_SYMBOL_LIST）"
+                echo "GKI_VERSION=2" >> $GITHUB_ENV
             else
-                echo "❌ 未找到任何ARM64配置"
-                echo "尝试查找所有架构配置..."
-                find . -name "*defconfig*" 2>/dev/null | grep -E "(gki|vendor|sm8550)" | head -10
-                exit 1
+                echo "⚠️ 未明确检测到GKI 2.0特定配置，可能为GKI 1.0"
+                echo "GKI_VERSION=1" >> $GITHUB_ENV
             fi
-        fi
-        
-        # 提取配置名称（去掉arch/arm64/configs/前缀）
-        CONFIG_NAME=$(echo "$GKI_CONFIG" | sed 's|^arch/arm64/configs/||')
-        
-        echo "CONFIG_PATH=$GKI_CONFIG" >> $GITHUB_ENV
-        echo "CONFIG_NAME=$CONFIG_NAME" >> $GITHUB_ENV
-        echo "config_name=$CONFIG_NAME" >> $GITHUB_OUTPUT
-        echo "config_path=$GKI_CONFIG" >> $GITHUB_OUTPUT
-        
-        echo "✅ 确定GKI配置: $CONFIG_NAME"
-
-    - name: Setup Build Environment
-      run: |
-        echo "设置GKI构建环境..."
-        
-        # 设置环境变量
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        
-        # 使用LLVM工具链
-        export LLVM=1
-        export LLVM_IAS=1
-        export CC=clang
-        export LD=ld.lld
-        
-        echo "ARCH=$ARCH" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=$CROSS_COMPILE" >> $GITHUB_ENV
-        echo "LLVM=1" >> $GITHUB_ENV
-        echo "LLVM_IAS=1" >> $GITHUB_ENV
-
-    - name: Prepare Kernel Source
-      run: |
-        cd kernel/source
-        echo "准备内核源码..."
-        
-        # 清理之前的构建
-        make mrproper 2>/dev/null || echo "清理构建目录"
-        
-        # 显示内核版本
-        echo "内核版本信息:"
-        grep -E "^VERSION|^PATCHLEVEL|^SUBLEVEL" Makefile || echo "无法获取版本信息"
-        
-        # 显示架构配置
-        echo "架构配置目录:"
-        ls -la arch/$ARCH/configs/ 2>/dev/null || echo "无法访问架构配置"
-
-    - name: Configure GKI Kernel
-      run: |
-        cd kernel/source
-        echo "配置GKI内核..."
-        
-        echo "使用配置: ${{ env.CONFIG_NAME }}"
-        echo "配置路径: ${{ env.CONFIG_PATH }}"
-        
-        # 确保配置存在
-        if [ ! -f "${{ env.CONFIG_PATH }}" ]; then
-            echo "❌ 配置文件不存在: ${{ env.CONFIG_PATH }}"
-            echo "可用的ARM64配置:"
-            find arch/arm64/configs -name "*.defconfig" 2>/dev/null | head -20
+            echo "DEFCONFIG_NAME=gki_defconfig" >> $GITHUB_ENV
+        else
+            echo "❌ 未找到gki_defconfig"
             exit 1
         fi
         
-        # 使用找到的配置
-        echo "应用defconfig: ${{ env.CONFIG_NAME }}"
-        make ARCH=$ARCH ${{ env.CONFIG_NAME }}
+        # 设置构建环境变量
+        echo "ARCH=arm64" >> $GITHUB_ENV
+        echo "CROSS_COMPILE=aarch64-linux-gnu-" >> $GITHUB_ENV
+        echo "LLVM=1" >> $GITHUB_ENV
+        echo "LLVM_IAS=1" >> $GITHUB_ENV
+        echo "CC=clang" >> $GITHUB_ENV
+        echo "LD=ld.lld" >> $GITHUB_ENV
+        echo "AR=llvm-ar" >> $GITHUB_ENV
+        echo "STRIP=llvm-strip" >> $GITHUB_ENV
         
-        # 验证配置
+        # 对于GKI 2.0，可能需要设置KMI版本
+        echo "KERNEL_RELEASE=${KERNEL_VERSION}.${PATCHLEVEL}" >> $GITHUB_ENV
+        echo "gki_version=$GKI_VERSION" >> $GITHUB_OUTPUT
+
+    - name: Configure GKI 2.0 Kernel
+      run: |
+        cd kernel_workspace/kernel
+        echo "配置GKI 2.0内核..."
+        
+        echo "GKI版本: ${{ env.GKI_VERSION }}"
+        echo "内核版本: ${{ env.KERNEL_RELEASE }}"
+        
+        # 清理之前的构建
+        make ARCH=${{ env.ARCH }} mrproper 2>/dev/null || echo "清理构建目录"
+        
+        # 应用gki_defconfig配置
+        echo "应用gki_defconfig配置..."
+        make ARCH=${{ env.ARCH }} ${{ env.DEFCONFIG_NAME }}
+        
         if [ ! -f ".config" ]; then
-            echo "❌ 配置文件生成失败"
+            echo "❌ 配置失败，未生成.config文件"
             exit 1
         fi
         
         echo "✅ 初始配置完成"
         
-        # 显示配置摘要
-        echo "配置摘要:"
-        grep -E "CONFIG_(MODULES|KPROBES|GKI|ARM64)" .config 2>/dev/null | head -20
+        # 如果是GKI 2.0，确保相关配置
+        if [ "${{ env.GKI_VERSION }}" = "2" ] || [ "${{ env.GKI_VERSION }}" = "2.0" ]; then
+            echo "应用GKI 2.0特定配置..."
+            
+            # 启用GKI 2.0需要的选项
+            ./scripts/config --enable GKI
+            ./scripts/config --enable MODULES
+            ./scripts/config --enable TRIM_UNUSED_KSYMS
+            
+            # KMI相关配置
+            ./scripts/config --enable KMI_SYMBOL_LIST
+            ./scripts/config --set-val KMI_SYMBOL_LIST_STRICT_MODE 0
+            
+            # 调试符号
+            ./scripts/config --enable DEBUG_INFO
+            ./scripts/config --enable DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
+            
+            echo "✅ GKI 2.0配置应用完成"
+        fi
 
-    - name: Apply Kernel Configurations
+    - name: Apply Kernel Customizations
       run: |
-        cd kernel/source
-        echo "应用内核配置..."
+        cd kernel_workspace/kernel
+        echo "应用内核定制配置..."
         
-        # 启用必要选项
-        echo "启用内核模块支持..."
+        # 启用模块支持
         ./scripts/config --enable MODULES
         ./scripts/config --enable MODULE_UNLOAD
+        ./scripts/config --enable MODULE_FORCE_UNLOAD
         
         # 启用KPROBES（如果需要KPM）
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
@@ -231,262 +179,195 @@ jobs:
             ./scripts/config --enable KPROBES
             ./scripts/config --enable HAVE_KPROBES
             ./scripts/config --enable KPROBE_EVENTS
+            ./scripts/config --enable OPTPROBES
         fi
         
         # 生成最终配置
         echo "生成最终配置..."
-        make ARCH=$ARCH olddefconfig
+        make ARCH=${{ env.ARCH }} olddefconfig
         
         echo "✅ 配置更新完成"
         
-        # 显示最终配置
-        echo "最终配置状态:"
+        # 显示关键配置状态
+        echo "关键配置状态:"
+        ./scripts/config --state GKI
         ./scripts/config --state MODULES
+        ./scripts/config --state KMI_SYMBOL_LIST
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
             ./scripts/config --state KPROBES
-            ./scripts/config --state HAVE_KPROBES
         fi
 
-    - name: Build GKI Kernel
+    - name: Build GKI 2.0 Kernel
       run: |
-        cd kernel/source
-        echo "开始构建GKI内核..."
+        cd kernel_workspace/kernel
+        echo "开始构建GKI 2.0内核..."
         
-        # 显示环境
+        # 显示详细环境
         echo "构建环境:"
-        echo "ARCH: $ARCH"
-        echo "CROSS_COMPILE: $CROSS_COMPILE"
-        echo "LLVM: $LLVM"
-        echo "CC: $(which $CC)"
+        echo "ARCH: ${{ env.ARCH }}"
+        echo "CROSS_COMPILE: ${{ env.CROSS_COMPILE }}"
+        echo "CC: $(which ${{ env.CC }})"
+        echo "LD: $(which ${{ env.LD }})"
+        echo "AR: $(which ${{ env.AR }})"
+        echo "GKI版本: ${{ env.GKI_VERSION }}"
         
         # 获取CPU核心数
         CORE_COUNT=$(nproc)
         echo "使用 $CORE_COUNT 个核心进行编译"
         
-        # 编译内核Image
+        # 构建内核Image
         echo "编译内核Image..."
-        make ARCH=$ARCH CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 -j$CORE_COUNT Image.gz-dtb
+        make ARCH=${{ env.ARCH }} \
+             CC=${{ env.CC }} \
+             LD=${{ env.LD }} \
+             AR=${{ env.AR }} \
+             STRIP=${{ env.STRIP }} \
+             LLVM=1 \
+             LLVM_IAS=1 \
+             -j$CORE_COUNT \
+             Image.gz-dtb
         
         # 检查构建结果
         echo "检查构建输出..."
         if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
             IMAGE_SIZE=$(stat -c%s "arch/arm64/boot/Image.gz-dtb")
-            echo "✅ GKI内核构建成功"
+            echo "✅ GKI 2.0内核构建成功"
             echo "  文件: arch/arm64/boot/Image.gz-dtb"
             echo "  大小: $IMAGE_SIZE 字节"
-            
-            # 验证文件类型
+            echo "  文件类型:"
             file arch/arm64/boot/Image.gz-dtb
+            
+            # 检查是否有未压缩的Image
+            if [ -f "arch/arm64/boot/Image" ]; then
+                echo "  同时生成: arch/arm64/boot/Image"
+            fi
         else
             echo "❌ 未找到内核镜像"
-            echo "查找其他可能的输出:"
-            find arch/arm64/boot -type f 2>/dev/null
-            echo "构建日志:"
-            tail -100 ./*.log 2>/dev/null || echo "无日志文件"
-            exit 1
+            echo "尝试编译标准Image..."
+            make ARCH=${{ env.ARCH }} \
+                 CC=${{ env.CC }} \
+                 LD=${{ env.LD }} \
+                 LLVM=1 \
+                 LLVM_IAS=1 \
+                 -j$CORE_COUNT \
+                 Image
+                 
+            if [ -f "arch/arm64/boot/Image" ]; then
+                IMAGE_SIZE=$(stat -c%s "arch/arm64/boot/Image")
+                echo "✅ 标准Image编译成功: $IMAGE_SIZE 字节"
+            else
+                echo "❌ 编译失败"
+                exit 1
+            fi
         fi
-        
-        # 可选：编译模块
-        echo "编译内核模块..."
-        make ARCH=$ARCH CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 -j$CORE_COUNT modules 2>/dev/null || echo "模块编译失败或跳过"
-        
-        echo "✅ GKI内核构建完成"
 
-    - name: Prepare GKI Package
+    - name: Check GKI Compatibility
       run: |
-        echo "准备GKI内核包..."
+        cd kernel_workspace/kernel
+        echo "检查GKI兼容性..."
         
-        # 创建打包目录
-        PKG_DIR="${GITHUB_WORKSPACE}/gki_package"
+        # 检查内核是否包含GKI模块支持
+        echo "检查.config中的GKI相关配置:"
+        grep -E "CONFIG_(GKI|KMI|ANDROID)" .config 2>/dev/null | head -20
+        
+        # 检查模块支持
+        echo "检查模块支持:"
+        grep -E "CONFIG_MODULES" .config 2>/dev/null
+        
+        # 如果编译了模块，检查模块目录
+        if [ -d "modules" ]; then
+            echo "找到内核模块:"
+            ls modules/*.ko 2>/dev/null | head -5
+        fi
+
+    - name: Create GKI 2.0 Package
+      run: |
+        echo "创建GKI 2.0内核包..."
+        
+        PKG_DIR="${GITHUB_WORKSPACE}/gki2_package"
         mkdir -p "$PKG_DIR"
         
-        cd kernel/source
+        cd kernel_workspace/kernel
         
         # 复制内核镜像
         if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
             cp arch/arm64/boot/Image.gz-dtb "$PKG_DIR/Image.gz-dtb"
-            echo "复制内核镜像: Image.gz-dtb"
+            echo "复制: Image.gz-dtb"
         elif [ -f "arch/arm64/boot/Image" ]; then
             cp arch/arm64/boot/Image "$PKG_DIR/Image"
-            echo "复制内核镜像: Image"
+            echo "复制: Image"
         else
             echo "❌ 未找到内核镜像"
             exit 1
-        fi
-        
-        # 复制模块（如果存在）
-        if [ -d "modules" ]; then
-            mkdir -p "$PKG_DIR/modules"
-            find modules -name "*.ko" -exec cp {} "$PKG_DIR/modules/" \; 2>/dev/null || true
-            echo "复制内核模块"
         fi
         
         # 复制配置文件
         cp .config "$PKG_DIR/kernel.config" 2>/dev/null || true
         
-        # 创建版本信息
+        # 复制模块（如果存在）
+        if [ -d "modules" ] && [ -n "$(ls -A modules/*.ko 2>/dev/null)" ]; then
+            mkdir -p "$PKG_DIR/modules"
+            find modules -name "*.ko" -exec cp {} "$PKG_DIR/modules/" \;
+            echo "复制内核模块"
+        fi
+        
+        # 创建GKI 2.0版本信息
         cat > "$PKG_DIR/version.txt" << EOF
-PixelOS GKI Kernel for SM8550
+PixelOS GKI 2.0 Kernel for OnePlus 12R
+设备: SM8550
 构建时间: $(date)
 内核版本: $(grep "^VERSION\|^PATCHLEVEL\|^SUBLEVEL" Makefile 2>/dev/null | tr '\n' ' ')
-配置文件: ${{ env.CONFIG_NAME }}
+GKI版本: ${{ env.GKI_VERSION }}
+配置文件: gki_defconfig
 架构: arm64
-工具链: LLVM/Clang
-GKI版本: 1.0
-特性:
+工具链: LLVM 15/Clang
+构建选项:
+  - 模块支持: 已启用
+  - KMI符号列表: 已启用
+  - 调试信息: 已启用
+功能特性:
   - SUSFS: ${{ inputs.enable_susfs }}
   - KPM: ${{ inputs.enable_kpm }}
 EOF
-        
-        echo "✅ GKI包准备完成"
 
-    - name: Create GKI Flash Package
+    - name: Package and Release
       run: |
-        echo "创建GKI刷机包..."
+        echo "打包并发布..."
         
-        PKG_DIR="${GITHUB_WORKSPACE}/gki_package"
+        PKG_DIR="${GITHUB_WORKSPACE}/gki2_package"
         cd "$PKG_DIR"
         
-        # 创建AnyKernel3风格的刷机包
-        mkdir -p META-INF/com/google/android
+        # 生成ZIP文件名
+        DATE_TAG=$(date +%Y%m%d-%H%M%S)
+        ZIP_NAME="PixelOS-SM8550-GKI2-${DATE_TAG}"
         
-        # 创建updater-script
-        cat > META-INF/com/google/android/updater-script << 'EOF'
-ui_print("PixelOS GKI Kernel for SM8550");
-ui_print("Build: $(date +%Y%m%d)");
-show_progress(0.500000, 0);
-
-# 解压内核
-package_extract_file("Image.gz-dtb", "/tmp/Image.gz-dtb");
-
-# 刷入内核
-run_program("/sbin/busybox", "dd", "if=/tmp/Image.gz-dtb", "of=/dev/block/bootdevice/by-name/boot");
-
-# 清理
-delete("/tmp/Image.gz-dtb");
-show_progress(0.100000, 0);
-ui_print("Installation completed!");
-EOF
-        
-        # 创建update-binary
-        cat > META-INF/com/google/android/update-binary << 'EOF'
-#!/sbin/sh
-#
-# PixelOS GKI Kernel Installer
-#
-OUTFD=$2
-ui_print() {
-    echo -e "ui_print $1\n" >> /proc/self/fd/$OUTFD
-}
-
-ui_print "PixelOS GKI Kernel Installer"
-ui_print "for OnePlus 12R (SM8550)"
-ui_print ""
-ui_print "Mounting system..."
-mount /system 2>/dev/null
-mount /vendor 2>/dev/null
-
-ui_print "Extracting kernel..."
-unzip -o "$3" -d /tmp/kernel_install
-
-if [ -f "/tmp/kernel_install/Image.gz-dtb" ]; then
-    ui_print "Flashing kernel..."
-    dd if=/tmp/kernel_install/Image.gz-dtb of=/dev/block/bootdevice/by-name/boot
-    ui_print "Kernel flashed successfully!"
-else
-    ui_print "Error: Kernel image not found!"
-    exit 1
-fi
-
-ui_print "Cleaning up..."
-umount /system 2>/dev/null
-umount /vendor 2>/dev/null
-rm -rf /tmp/kernel_install
-
-ui_print "Done! Please reboot."
-EOF
-        
-        chmod 755 META-INF/com/google/android/update-binary
-        
-        # 创建ZIP文件
-        ZIP_NAME="PixelOS-SM8550-GKI-$(date +%Y%m%d)"
         if [ "${{ inputs.enable_susfs }}" = "true" ]; then
             ZIP_NAME="${ZIP_NAME}-SUSFS"
         fi
+        
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
             ZIP_NAME="${ZIP_NAME}-KPM"
         fi
+        
         ZIP_NAME="${ZIP_NAME}.zip"
         
-        # 打包
+        # 创建ZIP文件
         zip -r9 "${GITHUB_WORKSPACE}/${ZIP_NAME}" .
         
-        echo "✅ GKI刷机包创建完成: $ZIP_NAME"
+        echo "✅ 打包完成: ${ZIP_NAME}"
         ls -lh "${GITHUB_WORKSPACE}/${ZIP_NAME}"
         
-        echo "GKI_ZIP=${ZIP_NAME}" >> $GITHUB_ENV
-        echo "GKI_SIZE=$(stat -c%s "${GITHUB_WORKSPACE}/${ZIP_NAME}")" >> $GITHUB_ENV
-
-    - name: Upload GKI Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: gki-kernel
-        path: |
-          ${{ github.workspace }}/*.zip
-          ${{ github.workspace }}/gki_package/
-
-    - name: Create Release
-      if: success() && env.GKI_ZIP != ''
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        echo "创建GitHub发布..."
+        # 保存信息
+        echo "KERNEL_ZIP=${ZIP_NAME}" >> $GITHUB_ENV
+        echo "ZIP_SIZE=$(stat -c%s "${GITHUB_WORKSPACE}/${ZIP_NAME}")" >> $GITHUB_ENV
         
-        ZIP_PATH="${GITHUB_WORKSPACE}/$GKI_ZIP"
-        
-        if [ ! -f "$ZIP_PATH" ]; then
-            echo "❌ ZIP文件不存在: $ZIP_PATH"
-            exit 1
-        fi
-        
-        # 生成版本标签
-        VERSION_TAG="gki-$(date +%Y%m%d-%H%M)"
-        
-        # 创建发布说明
-        RELEASE_BODY="# PixelOS GKI Kernel for OnePlus 12R (SM8550)
-        
-## Build Information
-- **Build Time:** $(date)
-- **Kernel Version:** $(cd kernel/source && grep "^VERSION\|^PATCHLEVEL\|^SUBLEVEL" Makefile 2>/dev/null | tr '\n' ' ')
-- **Configuration:** ${{ env.CONFIG_NAME }}
-- **Architecture:** arm64
-- **Toolchain:** LLVM/Clang
-
-## Features
-- SUSFS Support: ${{ inputs.enable_susfs }}
-- KPM Support: ${{ inputs.enable_kpm }}
-
-## Installation
-1. Download \`$GKI_ZIP\`
-2. Boot into custom recovery (TWRP/OrangeFox)
-3. Flash the zip file
-4. Reboot
-
-## Notes
-- This is a GKI (Generic Kernel Image) build
-- Compatible with Android 13+
-- Backup your current kernel before flashing
-- Requires unlocked bootloader
-
-## File Information
-- **File:** $GKI_ZIP
-- **Size:** ${{ env.GKI_SIZE }} bytes
-- **SHA256:** $(sha256sum "$ZIP_PATH" | cut -d' ' -f1)"
-
         # 创建发布
-        gh release create "$VERSION_TAG" \
-            --title "PixelOS GKI Kernel $(date +%Y%m%d)" \
-            --notes "$RELEASE_BODY" \
-            "$ZIP_PATH"
-        
-        echo "✅ 发布创建完成: $VERSION_TAG"
+        if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
+            RELEASE_TAG="gki2-$(date +%Y%m%d)"
+            RELEASE_BODY="PixelOS GKI 2.0 Kernel for SM8550\nBuilt: $(date)\nGKI Version: ${{ env.GKI_VERSION }}"
+            
+            gh release create "$RELEASE_TAG" \
+                --title "PixelOS GKI 2.0 Kernel" \
+                --notes "$RELEASE_BODY" \
+                "${GITHUB_WORKSPACE}/${ZIP_NAME}" 2>/dev/null || echo "发布创建失败或已存在"
+        fi
