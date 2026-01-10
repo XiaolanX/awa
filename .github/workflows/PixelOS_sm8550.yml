@@ -11,47 +11,45 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04 # 匹配实际运行环境
+    runs-on: ubuntu-22.04
     permissions:
       contents: write
 
     steps:
-      # 修复环境准备：替换为稳定可用的NDK r25b（兼容5.15内核编译）
+      # 关键修复：使用GitHub Action预安装的NDK，无需手动下载
       - name: Setup Environment
         run: |
-          # 1. 仅更新源，不做全量升级
+          # 1. 仅更新源，不做全量升级，安装核心依赖
           sudo apt update -y
-          
-          # 2. 安装必需依赖（新增unzip/wget，保留libelf-dev）
           sudo apt install -y --no-install-recommends \
             bc bison build-essential ccache curl flex g++-multilib gcc-multilib git \
             gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev \
             liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev libssl-dev libxml2 \
             libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip \
             zlib1g-dev openjdk-11-jdk python3 python3-pip libclang-dev clang \
-            ninja-build pkg-config libglib2.0-dev libpixman-1-dev libelf-dev unzip wget
-          
-          # 3. 下载稳定可用的NDK r25b（替代已404的r24b，兼容原编译逻辑）
-          mkdir -p ~/android-ndk
-          cd ~/android-ndk
-          # 使用国内镜像加速下载，避免谷歌官方链接问题
-          wget --no-check-certificate --continue --tries=5 \
-            https://mirror.nju.edu.cn/android-ndk/android-ndk-r25b-linux.zip \
-            -O ndk.zip
-          
-          # 4. 校验并解压NDK
-          if [ -s ndk.zip ]; then
-            unzip -q ndk.zip -d ~/android-ndk
-          else
-            echo "Error: NDK zip file is empty or corrupted!"
-            exit 1
-          fi
-          
-          # 5. 配置NDK环境变量（路径适配r25b）
-          export ANDROID_NDK_HOME=~/android-ndk/android-ndk-r25b
+            ninja-build pkg-config libglib2.0-dev libpixman-1-dev libelf-dev
+
+          # 2. 配置GitHub Action内置的NDK（路径固定，无需下载）
+          # GitHub Ubuntu 22.04 Runner内置NDK路径：/usr/local/lib/android/sdk/ndk/25.2.9519653
+          export ANDROID_NDK_HOME=/usr/local/lib/android/sdk/ndk/25.2.9519653
           export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
           echo "PATH=$PATH" >> $GITHUB_ENV
+
+          # 验证NDK是否存在
+          if [ ! -d "$ANDROID_NDK_HOME" ]; then
+            echo "内置NDK不存在，尝试备选路径..."
+            # 备选路径（兼容不同Runner版本）
+            export ANDROID_NDK_HOME=$(ls -d /usr/local/lib/android/sdk/ndk/* | head -n1)
+            echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
+            echo "PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH" >> $GITHUB_ENV
+          fi
+
+          # 验证工具链可用性
+          if ! command -v aarch64-linux-android-clang &> /dev/null; then
+            echo "NDK工具链不可用，退出！"
+            exit 1
+          fi
 
       # 保留原代码的源码拉取逻辑
       - name: Clone Kernel Source
@@ -66,14 +64,14 @@ jobs:
           cd kernel
           cp arch/arm64/configs/ace3_defconfig .config
           
-          # SUSFS配置
+          # SUSFS核心配置
           echo "CONFIG_SUSFS=y" >> .config
           echo "CONFIG_SUSFS_FS=y" >> .config
           echo "CONFIG_SUSFS_PROC=y" >> .config
           echo "CONFIG_SUSFS_SECURITY=y" >> .config
           echo "CONFIG_SUSFS_DEBUG=n" >> .config
           
-          # KPM配置
+          # KPM核心配置
           echo "CONFIG_KPM=y" >> .config
           echo "CONFIG_KPM_CORE=y" >> .config
           echo "CONFIG_KPM_MODULES=y" >> .config
@@ -82,24 +80,25 @@ jobs:
           make olddefconfig
           grep -E "CONFIG_SUSFS|CONFIG_KPM" .config
 
-      # 保留原代码的编译逻辑
+      # 适配内置NDK的编译逻辑（仅调整工具链名称，其余不变）
       - name: Build Kernel
         run: |
           cd kernel
           export ARCH=arm64
           export SUBARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnu-
+          # 使用NDK内置的aarch64-linux-android工具链（兼容原逻辑）
+          export CROSS_COMPILE=aarch64-linux-android-
+          export CROSS_COMPILE_ARM32=arm-linux-androideabi-
           export CC=clang
-          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CLANG_TRIPLE=aarch64-linux-android-
           export LD=lld
 
           make -j$(nproc) \
             O=out \
             ARCH=arm64 \
             CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu-
+            CLANG_TRIPLE=aarch64-linux-android- \
+            CROSS_COMPILE=aarch64-linux-android-
 
       # 保留原代码的打包逻辑
       - name: Package Kernel
