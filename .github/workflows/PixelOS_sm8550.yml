@@ -327,40 +327,34 @@ EOF
 
     - name: Package and Release
       run: |
-        echo "打包并发布..."
+        echo "开始打包发布流程..."
         
+        # 1. 准备目录
         PKG_DIR="${GITHUB_WORKSPACE}/gki2_package"
         cd "$PKG_DIR"
         
-        # 生成ZIP文件名
-        DATE_TAG=$(date +%Y%m%d-%H%M%S)
+        # 2. 生成带时间戳的文件名
+        DATE_TAG=$(date +%Y%m%d-%H%M)
         ZIP_NAME="PixelOS-SM8550-GKI2-${DATE_TAG}"
         
-        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-            ZIP_NAME="${ZIP_NAME}-SUSFS"
-        fi
+        # 根据输入参数调整文件名
+        [[ "${{ inputs.enable_susfs }}" == "true" ]] && ZIP_NAME="${ZIP_NAME}-SUSFS"
+        [[ "${{ inputs.enable_kpm }}" == "true" ]] && ZIP_NAME="${ZIP_NAME}-KPM"
         
-        if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-            ZIP_NAME="${ZIP_NAME}-KPM"
-        fi
+        FINAL_ZIP="${GITHUB_WORKSPACE}/${ZIP_NAME}.zip"
         
-        ZIP_NAME="${ZIP_NAME}.zip"
+        # 3. 执行压缩
+        zip -r9 "$FINAL_ZIP" .
         
-        # 创建ZIP文件
-        zip -r9 "${GITHUB_WORKSPACE}/${ZIP_NAME}" .
+        echo "✅ 打包完成: ${ZIP_NAME}.zip"
         
-        echo "✅ 打包完成: ${ZIP_NAME}"
-        ls -lh "${GITHUB_WORKSPACE}/${ZIP_NAME}"
+        # 4. 创建发布 (使用环境变量规避 YAML 字符串解析问题)
+        TAG_NAME="gki2-${DATE_TAG}"
+        TITLE="PixelOS GKI 2.0 Kernel (${DATE_TAG})"
+        NOTES="Built for SM8550. GKI Version: ${{ env.GKI_VERSION }}. SUSFS: ${{ inputs.enable_susfs }}, KPM: ${{ inputs.enable_kpm }}."
         
-        # 保存信息
-        echo "KERNEL_ZIP=${ZIP_NAME}" >> $GITHUB_ENV
-        echo "ZIP_SIZE=$(stat -c%s "${GITHUB_WORKSPACE}/${ZIP_NAME}")" >> $GITHUB_ENV
-        
-        # 创建发布
-        RELEASE_TAG="gki2-$(date +%Y%m%d)"
-        RELEASE_BODY="PixelOS GKI 2.0 Kernel for SM8550\nBuilt: $(date)\nGKI Version: ${{ env.GKI_VERSION }}"
-        
-        gh release create "$RELEASE_TAG" \
-            --title "PixelOS GKI 2.0 Kernel" \
-            --notes "$RELEASE_BODY" \
-            "${GITHUB_WORKSPACE}/${ZIP_NAME}" 2>/dev/null || echo "发布创建失败或已存在"
+        # 使用 gh 命令行工具发布
+        gh release create "$TAG_NAME" \
+            "$FINAL_ZIP" \
+            --title "$TITLE" \
+            --notes "$NOTES" || echo "⚠️ Release 已经存在或创建失败，仅上传文件"
