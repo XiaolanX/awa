@@ -197,46 +197,32 @@ jobs:
         git reset --hard
 
     # ksu-next 和 sukisu 的构建步骤类似优化...
-    - name: Build Kernel with ksu-next
-      run: |
-        cd kernel/oneplus/sm8550
-        BUILD_ARGS="--clean --ksu-next"
-        [ "${{ inputs.enable_susfs }}" = "true" ] && BUILD_ARGS="$BUILD_ARGS --susfs"
-        [ "${{ inputs.enable_kpm }}" = "true" ] && BUILD_ARGS="$BUILD_ARGS --kpm"
-        
-        build_sm8550 $BUILD_ARGS
-        
-        FEATURE_TAG=""
-        [ "${{ inputs.enable_susfs }}" = "true" ] && FEATURE_TAG="${FEATURE_TAG}_susfs"
-        [ "${{ inputs.enable_kpm }}" = "true" ] && FEATURE_TAG="${FEATURE_TAG}_kpm"
-        
-        mv kernel.zip ${GITHUB_WORKSPACE}/ksu-next${FEATURE_TAG}.zip
-        git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
-
     - name: Build Kernel with sukisu
       run: |
         cd kernel/oneplus/sm8550
         BUILD_ARGS="--clean --sukisu"
-        [ "${{ inputs.enable_susfs }}" = "true" ] && BUILD_ARGS="$BUILD_ARGS --susfs"
-        [ "${{ inputs.enable_kpm }}" = "true" ] && BUILD_ARGS="$BUILD_ARGS --kpm"
+        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+          BUILD_ARGS="${BUILD_ARGS} --susfs"
+        fi
+        if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+          BUILD_ARGS="${BUILD_ARGS} --kpm"
+        fi
         
         build_sm8550 $BUILD_ARGS
         
+        # 生成文件名
         FEATURE_TAG=""
         [ "${{ inputs.enable_susfs }}" = "true" ] && FEATURE_TAG="${FEATURE_TAG}_susfs"
         [ "${{ inputs.enable_kpm }}" = "true" ] && FEATURE_TAG="${FEATURE_TAG}_kpm"
         
         mv kernel.zip ${GITHUB_WORKSPACE}/sukisu${FEATURE_TAG}.zip
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
+        cd -
 
     - name: Create GitHub Release
       run: |
         cd ${GITHUB_WORKSPACE}
-        RELEASE_FILES=$(ls *.zip 2>/dev/null | tr '\n' ' ' || echo "")
-        if [ -z "$RELEASE_FILES" ]; then
-            echo "❌ 未找到任何构建产物"
-            exit 1
-        fi
-        
+        # 关键修改：只发布包含 'sukisu' 的 ZIP 文件，而不是所有 ZIP
+        RELEASE_FILES=$(ls *sukisu*.zip | tr '\n' ' ')
         echo "发布文件: $RELEASE_FILES"
-        gh release create "$REL_NAME" --title "$REL_NAME" --notes "SUSFS: ${{ inputs.enable_susfs }}, KPM: ${{ inputs.enable_kpm }}, 类型: ${{ inputs.kpm_type }}" $RELEASE_FILES
+        gh release create "$REL_NAME" --title "$REL_NAME" --notes "SUSFS: ${{ inputs.enable_susfs }}, KPM: ${{ inputs.enable_kpm }}" $RELEASE_FILES
