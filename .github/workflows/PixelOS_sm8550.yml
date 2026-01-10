@@ -207,8 +207,6 @@ jobs:
         echo "ARCH: ${{ env.ARCH }}"
         echo "CROSS_COMPILE: ${{ env.CROSS_COMPILE }}"
         echo "CC: $(which ${{ env.CC }})"
-        echo "LD: $(which ${{ env.LD }})"
-        echo "AR: $(which ${{ env.AR }})"
         echo "GKI版本: ${{ env.GKI_VERSION }}"
         
         # 获取CPU核心数
@@ -234,15 +232,13 @@ jobs:
             echo "✅ GKI 2.0内核构建成功"
             echo "  文件: arch/arm64/boot/Image.gz-dtb"
             echo "  大小: $IMAGE_SIZE 字节"
-            echo "  文件类型:"
-            file arch/arm64/boot/Image.gz-dtb
             
             # 检查是否有未压缩的Image
             if [ -f "arch/arm64/boot/Image" ]; then
                 echo "  同时生成: arch/arm64/boot/Image"
             fi
         else
-            echo "❌ 未找到内核镜像"
+            echo "❌ 未找到内核镜像 (Image.gz-dtb)"
             echo "尝试编译标准Image..."
             make ARCH=${{ env.ARCH }} \
                  CC=${{ env.CC }} \
@@ -251,7 +247,7 @@ jobs:
                  LLVM_IAS=1 \
                  -j$CORE_COUNT \
                  Image
-                 
+            
             if [ -f "arch/arm64/boot/Image" ]; then
                 IMAGE_SIZE=$(stat -c%s "arch/arm64/boot/Image")
                 echo "✅ 标准Image编译成功: $IMAGE_SIZE 字节"
@@ -260,7 +256,6 @@ jobs:
                 exit 1
             fi
         fi
-
     - name: Check GKI Compatibility
       run: |
         cd kernel_workspace/kernel
