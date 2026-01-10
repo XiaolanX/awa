@@ -2,14 +2,33 @@ name: PixelOS_Kernel_CI-aston
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_susfs:
+        description: '启用 SUSFS 支持'
+        type: boolean
+        default: true
+      enable_kpm:
+        description: '启用 KPM (内核模块) 支持'
+        type: boolean
+        default: true
+      susfs_branch:
+        description: 'SUSFS 分支/版本'
+        type: string
+        default: 'main'
+      kpm_config:
+        description: 'KPM 配置类型'
+        type: choice
+        options:
+          - basic
+          - advanced
+        default: 'basic'
 
 jobs:
   PixelOS_Kernel_CI:
     name: PixelOS Kernel CI
-    # 核心修改：将自托管运行器改为 GitHub 托管的 Ubuntu 最新版本运行器
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # 改为 GitHub 托管的运行器
+    
     steps:
-
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
@@ -19,77 +38,136 @@ jobs:
       run: |
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
-    
+
+    - name: Setup SUSFS Environment
+      if: inputs.enable_susfs
+      run: |
+        echo "正在设置 SUSFS 环境..."
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b ${{ inputs.susfs_branch }} susfs_patches
+        # 复制 SUSFS 补丁到内核目录
+        cp -r susfs_patches/kernel_patches/* kernel/oneplus/sm8550/
+        echo "SUSFS 环境设置完成"
+
+    - name: Setup KPM Environment  
+      if: inputs.enable_kpm
+      run: |
+        echo "正在设置 KPM 环境..."
+        # 克隆 KPM 相关组件
+        git clone https://github.com/torvalds/linux/kernel/modules/kpm_template.git kpm_src --depth=1
+        # 复制 KPM 基础框架到内核模块目录
+        cp -r kpm_src/* kernel/oneplus/sm8550-modules/
+        echo "KPM 环境设置完成"
+
+    - name: Apply SUSFS Patches
+      if: inputs.enable_susfs
+      run: |
+        cd kernel/oneplus/sm8550
+        echo "应用 SUSFS 补丁..."
+        for patch_file in ../susfs_patches/*.patch; do
+          if [ -f "$patch_file" ]; then
+            echo "应用补丁: $(basename $patch_file)"
+            patch -p1 --no-backup-if-mismatch < "$patch_file" || echo "补丁应用可能存在问题，继续执行..."
+          fi
+        done
+        echo "SUSFS 补丁应用完成"
+
+    - name: Configure Kernel Options
+      run: |
+        cd kernel/oneplus/sm8550
+        # 备份原始配置文件
+        cp arch/arm64/configs/vendor/sm8550_defconfig arch/arm64/configs/vendor/sm8550_defconfig.backup
+        
+        # 基础配置
+        echo "CONFIG_MODULES=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+        echo "CONFIG_MODULE_UNLOAD=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+        
+        # 条件性添加 SUSFS 配置
+        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+          echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+          echo "SUSFS 配置已添加"
+        fi
+        
+        # 条件性添加 KPM 配置
+        if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+          echo "CONFIG_KPM=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+          echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+          echo "CONFIG_HAVE_KPROBES=y" >> arch/arm64/configs/vendor/sm8550_defconfig
+          echo "KPM 配置已添加"
+        fi
+        
+        echo "内核配置更新完成"
+
     - name: Setup release name
       run: |
         rm -rf ${GITHUB_WORKSPACE}/*.zip
         cd kernel/oneplus/sm8550
         SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
-        REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
-        echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
-
-    - name: Setup Build Environment
-      run: |
-        # 进入内核目录
-        cd kernel/oneplus/sm8550
-        
-        # 尝试1：检查 build_sm8550 是否是一个本地脚本
-        if [ -f "./build_sm8550" ]; then
-          echo "找到本地构建脚本，赋予执行权限并添加到PATH"
-          chmod +x ./build_sm8550
-          echo "$(pwd)" >> $GITHUB_PATH  # 将当前目录添加到GITHUB_PATH中，后续步骤自动可用[6](@ref)
-        
-        # 尝试2：如果它不是文件，可能是一个需要安装的工具，这里可以安装依赖
-        # 例如：sudo apt-get update && sudo apt-get install -y xxx
-        else
-          echo "错误：未找到 build_sm8550 脚本或可执行文件。"
-          echo "当前目录内容："
-          ls -la
-          exit 1  # 主动报错，停止工作流
+        # 在发布名称中包含功能标记
+        FEATURE_SUFFIX=""
+        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+          FEATURE_SUFFIX="${FEATURE_SUFFIX}_SUSFS"
         fi
+        if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+          FEATURE_SUFFIX="${FEATURE_SUFFIX}_KPM"
+        fi
+        REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")${FEATURE_SUFFIX}"
+        echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
 
     - name: Build Kernel with ksu
       run: |
         cd kernel/oneplus/sm8550
-        build_sm8550 --clean --ksu
-        mv kernel.zip ${GITHUB_WORKSPACE}/ksu.zip
+        # 传递 SUSFS 和 KPM 参数给构建脚本
+        BUILD_ARGS="--clean --ksu"
+        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+          BUILD_ARGS="${BUILD_ARGS} --susfs"
+        fi
+        if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+          BUILD_ARGS="${BUILD_ARGS} --kpm"
+        fi
+        
+        build_sm8550 $BUILD_ARGS
+        mv kernel.zip ${GITHUB_WORKSPACE}/ksu${{ inputs.enable_susfs && '_susfs' || '' }}${{ inputs.enable_kpm && '_kpm' || '' }}.zip
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
 
     - name: Build Kernel with ksu-next
       run: |
         cd kernel/oneplus/sm8550
-        build_sm8550 --clean --ksu-next
-        mv kernel.zip ${GITHUB_WORKSPACE}/ksu-next.zip
+        BUILD_ARGS="--clean --ksu-next"
+        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+          BUILD_ARGS="${BUILD_ARGS} --susfs"
+        fi
+        if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+          BUILD_ARGS="${BUILD_ARGS} --kpm"
+        fi
+        
+        build_sm8550 $BUILD_ARGS
+        mv kernel.zip ${GITHUB_WORKSPACE}/ksu-next${{ inputs.enable_susfs && '_susfs' || '' }}${{ inputs.enable_kpm && '_kpm' || '' }}.zip
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
 
     - name: Build Kernel with sukisu
       run: |
         cd kernel/oneplus/sm8550
-        # ... (此处是您添加的SUSFS和KPM配置代码，保持不变)
-        DEFCONFIG_PATHS=(
-          "arch/arm64/configs/oneplus_sm8550_defconfig"
-          "arch/arm64/configs/vendor/sm8550_defconfig"
-          "arch/arm64/configs/sm8550_defconfig"
-        )
-        for DEFCONFIG in "${DEFCONFIG_PATHS[@]}"; do
-          if [ -f "$DEFCONFIG" ]; then
-            echo "配置defconfig文件: $DEFCONFIG"
-            echo "CONFIG_KPROBES=y" >> "$DEFCONFIG"
-            # ... (其余配置选项)
-            break
-          fi
-        done
-        build_sm8550 --clean --sukisu
-        mv kernel.zip ${GITHUB_WORKSPACE}/sukisu.zip
+        BUILD_ARGS="--clean --sukisu"
+        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+          BUILD_ARGS="${BUILD_ARGS} --susfs"
+        fi
+        if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+          BUILD_ARGS="${BUILD_ARGS} --kpm"
+        fi
+        
+        build_sm8550 $BUILD_ARGS
+        mv kernel.zip ${GITHUB_WORKSPACE}/sukisu${{ inputs.enable_susfs && '_susfs' || '' }}${{ inputs.enable_kpm && '_kpm' || '' }}.zip
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
 
     - name: Create GitHub Release
-      # 重要修改：为GitHub CLI提供认证令牌，以便创建Release
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         cd ${GITHUB_WORKSPACE}
-        gh release create "$REL_NAME" --title "$REL_NAME" --notes "" ksu.zip ksu-next.zip sukisu.zip
+        # 动态收集所有生成的 zip 文件
+        RELEASE_FILES=$(ls *.zip | tr '\n' ' ')
+        echo "发布文件: $RELEASE_FILES"
+        gh release create "$REL_NAME" --title "$REL_NAME" --notes "SUSFS: ${{ inputs.enable_susfs }}, KPM: ${{ inputs.enable_kpm }}" $RELEASE_FILES
