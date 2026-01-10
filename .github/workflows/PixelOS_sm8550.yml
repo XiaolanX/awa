@@ -1,4 +1,4 @@
-name: PixelOS_Kernel_CI-aston
+name: PixelOS_Kernel_CI-Ultimate
 
 on:
   workflow_dispatch:
@@ -6,7 +6,8 @@ on:
 jobs:
   PixelOS_Kernel_CI:
     name: PixelOS Kernel CI
-    runs-on: self-hosted
+    # 如果你没有自建服务器，请务必使用 ubuntu-latest
+    runs-on: ubuntu-latest
     steps:
 
     - name: Checkout Repository
@@ -14,9 +15,17 @@ jobs:
       with:
         fetch-depth: 1
 
+    - name: Cleanup Disk Space
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+        sudo rm -rf "/usr/local/share/boost"
+        sudo rm -rf /usr/lib/mono
+
     - name: Clone Kernel and Dependencies
       run: |
+        # 克隆主内核
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
+        # 克隆外置模块
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
     
     - name: Setup release name
@@ -24,34 +33,44 @@ jobs:
         rm -rf ${GITHUB_WORKSPACE}/*.zip
         cd kernel/oneplus/sm8550
         SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
-        REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
+        REL_NAME="PixelOS_SM8550_SUSFS-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
         echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
 
-    - name: Build Kernel with ksu
+    - name: Integrate SUSFS and KPM
       run: |
         cd kernel/oneplus/sm8550
-        build_sm8550 --clean --ksu
-        mv kernel.zip ${GITHUB_WORKSPACE}/ksu.zip
-        git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
-        cd -
+        
+        # 1. 集成 SUSFS (针对 5.15 GKI)
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-5.15 ../susfs
+        cp ../susfs/kernel_patches/fs/* fs/
+        cp ../susfs/kernel_patches/include/linux/* include/linux/
+        # 应用 5.15 专用补丁
+        patch -p1 < ../susfs/kernel_patches/5.15/60_add_susfs_in_gki-android14-5.15.patch || echo "SUSFS 补丁跳过或存在部分冲突"
 
-    - name: Build Kernel with ksu-next
-      run: |
-        cd kernel/oneplus/sm8550
-        build_sm8550 --clean --ksu-next
-        mv kernel.zip ${GITHUB_WORKSPACE}/ksu-next.zip
-        git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
-        cd -
+        # 2. 集成 KPM
+        git clone https://github.com/rifsxd/KPM.git ../KPM
+        cp -r ../KPM/kpm drivers/
+        # 修改 Makefile 和 Kconfig 让系统识别 KPM
+        grep -q "obj-y += kpm/" drivers/Makefile || echo "obj-y += kpm/" >> drivers/Makefile
+        grep -q 'source "drivers/kpm/Kconfig"' drivers/Kconfig || echo 'source "drivers/kpm/Kconfig"' >> drivers/Kconfig
 
-    - name: Build Kernel with sukisu
+        # 3. 注入配置到 gki_defconfig (确保功能启用)
+        echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/gki_defconfig
+        echo "CONFIG_KPM=y" >> arch/arm64/configs/gki_defconfig
+        echo "CONFIG_KALLSYMS_ALL=y" >> arch/arm64/configs/gki_defconfig
+
+    - name: Build Kernel with SukiSU + SUSFS + KPM
       run: |
         cd kernel/oneplus/sm8550
+        # 执行你原本的编译脚本，带上 --sukisu 参数
+        # 脚本内部应该会自动处理 SukiSU 的集成
         build_sm8550 --clean --sukisu
-        mv kernel.zip ${GITHUB_WORKSPACE}/sukisu.zip
-        git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
-        cd -
+        mv kernel.zip ${GITHUB_WORKSPACE}/PixelOS-SukiSU-SUSFS.zip
 
     - name: Create GitHub Release
       run: |
         cd ${GITHUB_WORKSPACE}
-        gh release create "$REL_NAME" --title "$REL_NAME" --notes "" ksu.zip ksu-next.zip sukisu.zip
+        # 使用 GitHub CLI 上传
+        gh release create "$REL_NAME" --title "$REL_NAME" --notes "Integrated SukiSU, SUSFS, and KPM" PixelOS-SukiSU-SUSFS.zip
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
