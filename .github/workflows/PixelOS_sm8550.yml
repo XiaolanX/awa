@@ -11,18 +11,18 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04 # 匹配实际运行环境，避免版本不一致问题
+    runs-on: ubuntu-22.04 # 匹配实际运行环境
     permissions:
       contents: write
 
     steps:
-      # 修复环境准备步骤：取消全量升级、稳定下载NDK、精简依赖
+      # 修复环境准备：替换为稳定可用的NDK r25b（兼容5.15内核编译）
       - name: Setup Environment
         run: |
-          # 1. 仅更新源，取消full-upgrade（避免耗时且引发无关依赖更新）
+          # 1. 仅更新源，不做全量升级
           sudo apt update -y
           
-          # 2. 安装必需依赖（仅保留内核编译核心依赖，新增libelf-dev）
+          # 2. 安装必需依赖（新增unzip/wget，保留libelf-dev）
           sudo apt install -y --no-install-recommends \
             bc bison build-essential ccache curl flex g++-multilib gcc-multilib git \
             gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev \
@@ -31,15 +31,15 @@ jobs:
             zlib1g-dev openjdk-11-jdk python3 python3-pip libclang-dev clang \
             ninja-build pkg-config libglib2.0-dev libpixman-1-dev libelf-dev unzip wget
           
-          # 3. 稳定下载Android NDK r24b（改用wget+校验，避免curl下载不完整）
+          # 3. 下载稳定可用的NDK r25b（替代已404的r24b，兼容原编译逻辑）
           mkdir -p ~/android-ndk
           cd ~/android-ndk
-          # 使用wget断点续传，添加超时重试
+          # 使用国内镜像加速下载，避免谷歌官方链接问题
           wget --no-check-certificate --continue --tries=5 \
-            https://dl.google.com/android/repository/android-ndk-r24b-linux.zip \
+            https://mirror.nju.edu.cn/android-ndk/android-ndk-r25b-linux.zip \
             -O ndk.zip
           
-          # 4. 解压前校验文件完整性（避免损坏文件解压失败）
+          # 4. 校验并解压NDK
           if [ -s ndk.zip ]; then
             unzip -q ndk.zip -d ~/android-ndk
           else
@@ -47,45 +47,42 @@ jobs:
             exit 1
           fi
           
-          # 5. 配置NDK环境变量
-          export ANDROID_NDK_HOME=~/android-ndk/android-ndk-r24b
+          # 5. 配置NDK环境变量（路径适配r25b）
+          export ANDROID_NDK_HOME=~/android-ndk/android-ndk-r25b
           export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME" >> $GITHUB_ENV
           echo "PATH=$PATH" >> $GITHUB_ENV
 
-      # 保留原代码的源码拉取逻辑（不改动仓库和分支）
+      # 保留原代码的源码拉取逻辑
       - name: Clone Kernel Source
         run: |
           git clone --depth=1 https://github.com/inferno0230/oneplus-ace3-kernel.git kernel
           cd kernel
           git checkout main
 
-      # 核心增量修改：仅添加SUSFS+KPM支持（不改动原有配置）
+      # 仅添加SUSFS+KPM支持（核心逻辑不变）
       - name: Enable SUSFS and KPM Support
         run: |
           cd kernel
-          # 1. 保留原defconfig，仅追加SUSFS和KPM配置
           cp arch/arm64/configs/ace3_defconfig .config
           
-          # 启用SUSFS核心配置（参考Numbersf的配置项）
+          # SUSFS配置
           echo "CONFIG_SUSFS=y" >> .config
           echo "CONFIG_SUSFS_FS=y" >> .config
           echo "CONFIG_SUSFS_PROC=y" >> .config
           echo "CONFIG_SUSFS_SECURITY=y" >> .config
-          echo "CONFIG_SUSFS_DEBUG=n" >> .config # 关闭调试避免兼容性问题
+          echo "CONFIG_SUSFS_DEBUG=n" >> .config
           
-          # 启用KPM核心配置（参考Numbersf的配置项）
+          # KPM配置
           echo "CONFIG_KPM=y" >> .config
           echo "CONFIG_KPM_CORE=y" >> .config
           echo "CONFIG_KPM_MODULES=y" >> .config
-          echo "CONFIG_KPM_COMPAT=y" >> .config # 兼容原有内核逻辑
+          echo "CONFIG_KPM_COMPAT=y" >> .config
           
-          # 生成最终配置，不改动原有配置项
           make olddefconfig
-          # 验证配置是否生效（可选，便于排查问题）
           grep -E "CONFIG_SUSFS|CONFIG_KPM" .config
 
-      # 保留原代码的编译逻辑（不改动编译参数、核心数、工具链）
+      # 保留原代码的编译逻辑
       - name: Build Kernel
         run: |
           cd kernel
@@ -104,11 +101,10 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu-
 
-      # 保留原代码的打包逻辑（不改动boot.img参数、打包格式）
+      # 保留原代码的打包逻辑
       - name: Package Kernel
         run: |
           cd kernel/out/arch/arm64/boot
-          # 保留原代码的mkbootimg参数（确保刷入正常）
           mkbootimg \
             --kernel Image.gz-dtb \
             --ramdisk ../../../../ramdisk/ace3-ramdisk.cpio.gz \
@@ -126,14 +122,14 @@ jobs:
 
           zip -r oneplus-ace3-kernel.zip boot-ace3.img
 
-      # 修复：使用v4版本的上传Artifact（已废弃v3）
+      # 使用v4版本上传产物
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: oneplus-ace3-kernel
           path: kernel/out/arch/arm64/boot/oneplus-ace3-kernel.zip
 
-      # 保留原代码的Release发布逻辑（如有）
+      # 保留原发布逻辑
       - name: Release
         uses: softprops/action-gh-release@v1
         if: github.ref == 'refs/heads/main'
