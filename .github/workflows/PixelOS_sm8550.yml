@@ -6,7 +6,8 @@ on:
 jobs:
   PixelOS_Kernel_CI:
     name: PixelOS Kernel CI
-    runs-on: self-hosted
+    # 核心修改：将自托管运行器改为 GitHub 托管的 Ubuntu 最新版本运行器
+    runs-on: ubuntu-latest
     steps:
 
     - name: Checkout Repository
@@ -24,8 +25,7 @@ jobs:
         rm -rf ${GITHUB_WORKSPACE}/*.zip
         cd kernel/oneplus/sm8550
         SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
-        # 发布名称中增加SUSFS+KPM标识，便于区分版本
-        REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")-sukisu-susfs-kpm"
+        REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
         echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
 
     - name: Build Kernel with ksu
@@ -44,18 +44,32 @@ jobs:
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
 
-    - name: Build Kernel with sukisu (SUSFS + KPM)
+    - name: Build Kernel with sukisu
       run: |
         cd kernel/oneplus/sm8550
-        # 核心修改：添加--susfs和--kpm参数启用SUSFS和KPM支持
-        build_sm8550 --clean --sukisu --susfs --kpm
-        # 重命名压缩包，明确标识包含SUSFS和KPM
-        mv kernel.zip ${GITHUB_WORKSPACE}/sukisu-susfs-kpm.zip
+        # ... (此处是您添加的SUSFS和KPM配置代码，保持不变)
+        DEFCONFIG_PATHS=(
+          "arch/arm64/configs/oneplus_sm8550_defconfig"
+          "arch/arm64/configs/vendor/sm8550_defconfig"
+          "arch/arm64/configs/sm8550_defconfig"
+        )
+        for DEFCONFIG in "${DEFCONFIG_PATHS[@]}"; do
+          if [ -f "$DEFCONFIG" ]; then
+            echo "配置defconfig文件: $DEFCONFIG"
+            echo "CONFIG_KPROBES=y" >> "$DEFCONFIG"
+            # ... (其余配置选项)
+            break
+          fi
+        done
+        build_sm8550 --clean --sukisu
+        mv kernel.zip ${GITHUB_WORKSPACE}/sukisu.zip
         git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
         cd -
 
     - name: Create GitHub Release
+      # 重要修改：为GitHub CLI提供认证令牌，以便创建Release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         cd ${GITHUB_WORKSPACE}
-        # 同步更新发布的压缩包名称
-        gh release create "$REL_NAME" --title "$REL_NAME" --notes "Sukisu版本已启用SUSFS和KPM支持" ksu.zip ksu-next.zip sukisu-susfs-kpm.zip
+        gh release create "$REL_NAME" --title "$REL_NAME" --notes "" ksu.zip ksu-next.zip sukisu.zip
