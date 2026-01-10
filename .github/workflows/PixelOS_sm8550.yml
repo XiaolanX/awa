@@ -1,4 +1,4 @@
-name: PixelOS Kernel CI
+name: PixelOS SM8550 Kernel Build
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ on:
         default: 'master'
 
 jobs:
-  build_kernel:
+  build:
     name: Build PixelOS Kernel
     runs-on: ubuntu-latest
     
@@ -27,230 +27,284 @@ jobs:
       with:
         fetch-depth: 1
 
-    - name: Install Dependencies
+    - name: Install Complete Toolchain
       run: |
-        echo "安装编译依赖..."
+        echo "安装完整工具链..."
         sudo apt-get update
         sudo apt-get install -y \
             build-essential libssl-dev bc kmod \
-            flex bison libelf-dev git ccache patch rsync \
+            flex bison libelf-dev git ccache \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             binutils-aarch64-linux-gnu libncurses-dev \
-            python3 python3-pip cpio lz4 device-tree-compiler
-        echo "依赖安装完成"
+            python3 python3-pip cpio lz4 device-tree-compiler \
+            rsync wget curl gnupg lsb-release software-properties-common \
+            clang lld llvm
+        
+        # 安装最新版Clang/LLVM
+        wget https://apt.llvm.org/llvm.sh
+        chmod +x llvm.sh
+        sudo ./llvm.sh 18
+        rm llvm.sh
+        
+        # 验证工具
+        echo "工具版本:"
+        aarch64-linux-gnu-gcc --version
+        clang-18 --version
+        ld.lld-18 --version
+        echo "工具链安装完成"
 
     - name: Clone Kernel Source
       run: |
         echo "克隆内核源码..."
-        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git \
-            --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
+        rm -rf kernel_workspace
+        mkdir -p kernel_workspace
         
-        if [ ! -d "kernel/oneplus/sm8550" ]; then
+        # 使用和参考工作流相同的方法克隆
+        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git \
+            --depth=1 -b sixteen-qpr1 kernel_workspace/kernel
+        
+        if [ ! -d "kernel_workspace/kernel" ]; then
             echo "❌ 内核源码克隆失败"
             exit 1
         fi
         echo "✅ 内核源码克隆成功"
 
-    - name: Explore Kernel Structure
+    - name: Setup Build Environment
+      id: setup_env
       run: |
-        echo "检查内核目录结构..."
-        cd kernel/oneplus/sm8550
-        echo "当前目录: $(pwd)"
-        echo "文件列表:"
+        echo "设置构建环境..."
+        
+        # 检查内核目录结构
+        cd kernel_workspace/kernel
+        echo "内核目录结构:"
         ls -la
-        echo "检查config目录:"
-        find arch/arm64/configs -name "*defconfig*" 2>/dev/null | head -10
-        echo "检查Makefile:"
-        grep -E "VERSION|PATCHLEVEL|SUBLEVEL" Makefile 2>/dev/null || echo "未找到版本信息"
-
-    - name: Find Config File
-      id: find_config
-      run: |
-        cd kernel/oneplus/sm8550
         
-        # 查找所有可能的defconfig文件
-        CONFIG_FILES=$(find arch/arm64/configs -name "*defconfig*" 2>/dev/null)
+        # 查找可用的defconfig
+        echo "查找defconfig文件..."
+        DEFCONFIGS=$(find arch/arm64/configs -name "*.defconfig" 2>/dev/null)
         
-        if [ -z "$CONFIG_FILES" ]; then
-            echo "❌ 未找到任何defconfig文件"
-            exit 1
+        if [ -z "$DEFCONFIGS" ]; then
+            echo "尝试查找任何config文件..."
+            find . -name "*defconfig*" 2>/dev/null
+        else
+            echo "找到的defconfig:"
+            echo "$DEFCONFIGS" | head -10
         fi
         
-        echo "找到的配置文件:"
-        echo "$CONFIG_FILES"
+        # 尝试常见的defconfig
+        CONFIG_CANDIDATES=("gki_defconfig" "sm8550_defconfig" "vendor/sm8550_defconfig" "qgki_defconfig")
         
-        # 尝试常见的配置文件名
-        CONFIG_CHOICES=(
-            "vendor/sm8550_defconfig"
-            "sm8550_defconfig" 
-            "vendor/sm8550-perf_defconfig"
-            "vendor/oneplus/sm8550_defconfig"
-            "qgki_defconfig"
-        )
-        
-        TARGET_CONFIG=""
-        for config in "${CONFIG_CHOICES[@]}"; do
+        for config in "${CONFIG_CANDIDATES[@]}"; do
             if [ -f "arch/arm64/configs/$config" ]; then
-                TARGET_CONFIG="$config"
-                echo "✅ 找到配置文件: $TARGET_CONFIG"
+                echo "✅ 找到defconfig: $config"
+                echo "DEFCONFIG_NAME=$config" >> $GITHUB_ENV
+                echo "DEFCONFIG_PATH=arch/arm64/configs/$config" >> $GITHUB_ENV
                 break
             fi
         done
         
-        if [ -z "$TARGET_CONFIG" ]; then
-            # 使用第一个找到的配置文件
-            TARGET_CONFIG=$(echo "$CONFIG_FILES" | head -1 | sed 's|^arch/arm64/configs/||')
-            echo "⚠️ 使用找到的第一个配置: $TARGET_CONFIG"
+        if [ -z "$DEFCONFIG_NAME" ]; then
+            echo "❌ 未找到标准的defconfig"
+            echo "尝试使用第一个找到的defconfig"
+            FIRST_CONFIG=$(find arch/arm64/configs -name "*.defconfig" 2>/dev/null | head -1)
+            if [ -n "$FIRST_CONFIG" ]; then
+                DEFCONFIG_NAME=$(basename "$FIRST_CONFIG" .defconfig)
+                DEFCONFIG_PATH=$(echo "$FIRST_CONFIG" | sed 's|^\./||')
+                echo "DEFCONFIG_NAME=$DEFCONFIG_NAME" >> $GITHUB_ENV
+                echo "DEFCONFIG_PATH=$DEFCONFIG_PATH" >> $GITHUB_ENV
+                echo "使用: $DEFCONFIG_NAME"
+            else
+                echo "无法继续，没有找到defconfig"
+                exit 1
+            fi
         fi
         
-        echo "target_config=$TARGET_CONFIG" >> $GITHUB_OUTPUT
-        echo "配置文件: $TARGET_CONFIG"
+        echo "使用defconfig: $DEFCONFIG_NAME"
+        echo "defconfig_path=$DEFCONFIG_PATH" >> $GITHUB_OUTPUT
 
-    - name: Setup SUSFS
+    - name: Apply SUSFS Patches
       if: inputs.enable_susfs
       run: |
-        echo "设置SUSFS..."
+        echo "应用SUSFS补丁..."
         
+        # 从GitLab克隆SUSFS
         if git clone https://gitlab.com/simonpunk/susfs4ksu.git \
             -b ${{ inputs.susfs_branch }} susfs_patches 2>/dev/null; then
             echo "✅ SUSFS仓库克隆成功"
             
             if [ -d "susfs_patches/kernel_patches" ]; then
-                echo "复制SUSFS补丁..."
+                echo "查找SUSFS补丁..."
                 find susfs_patches/kernel_patches -name "*.patch" 2>/dev/null | head -5
-            else
-                echo "⚠️ 未找到SUSFS补丁目录"
             fi
         else
-            echo "⚠️ SUSFS克隆失败，跳过SUSFS"
+            echo "⚠️ SUSFS克隆失败，继续构建"
         fi
-
-    - name: Setup Build Environment
-      run: |
-        echo "设置构建环境..."
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        
-        # 验证编译器
-        echo "验证交叉编译器:"
-        ${CROSS_COMPILE}gcc --version || echo "❌ 编译器不可用"
-        
-        # 设置环境变量供后续步骤使用
-        echo "ARCH=$ARCH" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=$CROSS_COMPILE" >> $GITHUB_ENV
-        echo "CONFIG_FILE=${{ steps.find_config.outputs.target_config }}" >> $GITHUB_ENV
 
     - name: Configure Kernel
       run: |
-        cd kernel/oneplus/sm8550
-        
+        cd kernel_workspace/kernel
         echo "配置内核..."
-        echo "使用配置文件: $CONFIG_FILE"
         
-        # 清理之前的构建
-        make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE mrproper 2>/dev/null || echo "清理完成"
+        echo "使用的defconfig: ${{ env.DEFCONFIG_NAME }}"
+        echo "defconfig路径: ${{ env.DEFCONFIG_PATH }}"
         
-        # 应用默认配置
-        make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE $CONFIG_FILE
+        # 清理构建目录
+        rm -rf out
+        mkdir -p out
         
-        # 修改配置选项
+        # 设置环境变量
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
+        # 使用LLVM工具链
+        export LLVM=1
+        export LLVM_IAS=1
+        
+        # 设置构建参数
+        MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1"
+        
+        # 配置内核
+        echo "运行配置命令: make $MAKE_ARGS O=out ${{ env.DEFCONFIG_NAME }}"
+        make $MAKE_ARGS O=out ${{ env.DEFCONFIG_NAME }}
+        
+        # 如果需要，可以在这里修改配置
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-            echo "启用KPM支持..."
-            scripts/config --enable KPROBES
-            scripts/config --enable HAVE_KPROBES
-            scripts/config --enable KPROBE_EVENTS
+            echo "启用KPROBES支持..."
+            # 通过scripts/config修改配置
+            if [ -f "scripts/config" ]; then
+                ./scripts/config --file out/.config --enable KPROBES
+                ./scripts/config --file out/.config --enable HAVE_KPROBES
+                ./scripts/config --file out/.config --enable KPROBE_EVENTS
+            fi
         fi
         
-        # 启用模块支持
-        scripts/config --enable MODULES
-        scripts/config --enable MODULE_UNLOAD
-        
-        # 生成最终配置
-        make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE olddefconfig
+        # 重新生成配置
+        make $MAKE_ARGS O=out olddefconfig
         
         echo "配置完成"
 
     - name: Build Kernel
       run: |
-        cd kernel/oneplus/sm8550
-        
+        cd kernel_workspace/kernel
         echo "开始编译内核..."
         
-        # 显示配置摘要
-        echo "配置摘要:"
-        grep -E "CONFIG_(MODULES|KPROBES)" .config 2>/dev/null || echo "未找到相关配置"
+        # 设置环境变量
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export LLVM=1
+        export LLVM_IAS=1
         
-        # 获取CPU核心数用于并行编译
+        # 获取CPU核心数
         CORE_COUNT=$(nproc)
         echo "使用 $CORE_COUNT 个核心进行编译"
         
-        # 编译内核镜像
-        make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$CORE_COUNT Image.gz-dtb
+        # 检查.config文件
+        if [ ! -f "out/.config" ]; then
+            echo "❌ 未找到.config文件"
+            exit 1
+        fi
         
-        # 验证构建结果
-        if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
+        # 编译内核
+        echo "编译内核镜像..."
+        make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out -j$CORE_COUNT
+        
+        # 检查构建结果
+        echo "检查构建输出..."
+        if [ -f "out/arch/arm64/boot/Image" ]; then
             echo "✅ 内核编译成功"
-            ls -lh arch/arm64/boot/Image.gz-dtb
+            echo "找到内核镜像: out/arch/arm64/boot/Image"
+            ls -lh out/arch/arm64/boot/Image
+            
+            # 检查是否生成了其他格式
+            find out/arch/arm64/boot -type f | while read file; do
+                echo "找到文件: $file ($(stat -c%s "$file") 字节)"
+            done
         else
-            echo "❌ 内核编译失败"
-            echo "查找可能的输出文件:"
-            find arch/arm64/boot -type f 2>/dev/null
+            echo "❌ 未找到内核镜像"
+            echo "检查构建输出目录:"
+            find out -name "Image*" -o -name "*.gz*" -o -name "*.dtb" 2>/dev/null
+            echo "构建日志:"
+            tail -50 out/build.log 2>/dev/null || echo "无构建日志"
             exit 1
         fi
 
-    - name: Create Package
+    - name: Create Kernel Package
       run: |
         echo "创建内核包..."
         
-        # 创建工作目录
-        PKG_DIR="${GITHUB_WORKSPACE}/kernel_package"
-        mkdir -p "$PKG_DIR"
+        KERNEL_DIR="${GITHUB_WORKSPACE}/kernel_package"
+        mkdir -p "$KERNEL_DIR"
         
-        # 复制内核镜像
-        cp kernel/oneplus/sm8550/arch/arm64/boot/Image.gz-dtb "$PKG_DIR/"
+        # 查找内核镜像
+        cd kernel_workspace/kernel
         
-        # 创建简单的刷机脚本
-        cat > "$PKG_DIR/flash.sh" << 'EOF'
-        #!/bin/bash
+        # 尝试不同的镜像文件名
+        for img in "out/arch/arm64/boot/Image" "out/arch/arm64/boot/Image.gz" "out/arch/arm64/boot/Image.gz-dtb"; do
+            if [ -f "$img" ]; then
+                echo "复制内核镜像: $img"
+                cp "$img" "$KERNEL_DIR/kernel.img"
+                break
+            fi
+        done
         
-        echo "PixelOS Kernel 刷机脚本"
-        echo "设备: OnePlus 12R (SM8550)"
-        echo "构建时间: $(date)"
-        echo ""
-        
-        if [ ! -f "Image.gz-dtb" ]; then
-            echo "错误: 未找到内核镜像"
+        if [ ! -f "$KERNEL_DIR/kernel.img" ]; then
+            echo "❌ 未找到内核镜像文件"
+            echo "可用的文件:"
+            find out/arch/arm64/boot -type f 2>/dev/null
             exit 1
         fi
         
-        echo "请手动将 Image.gz-dtb 刷入设备"
-        echo "建议使用以下命令:"
-        echo "  fastboot flash boot Image.gz-dtb"
+        # 创建简单的刷机脚本
+        cat > "$KERNEL_DIR/flash.sh" << 'EOF'
+        #!/bin/bash
+        
+        echo "=========================================="
+        echo "PixelOS Kernel 刷机脚本"
+        echo "设备: OnePlus 12R (SM8550)"
+        echo "构建时间: $(date)"
+        echo "=========================================="
+        
+        if [ ! -f "kernel.img" ]; then
+            echo "错误: 未找到内核镜像 (kernel.img)"
+            exit 1
+        fi
+        
+        echo "内核镜像大小: $(stat -c%s kernel.img) 字节"
+        echo ""
+        echo "刷机命令:"
+        echo "  fastboot flash boot kernel.img"
+        echo ""
+        echo "或使用以下步骤:"
+        echo "1. 将设备启动到fastboot模式"
+        echo "2. 连接设备到电脑"
+        echo "3. 运行: fastboot flash boot kernel.img"
+        echo "4. 运行: fastboot reboot"
         EOF
         
-        chmod +x "$PKG_DIR/flash.sh"
+        chmod +x "$KERNEL_DIR/flash.sh"
         
         # 创建版本信息
-        cat > "$PKG_DIR/version.txt" << EOF
+        cat > "$KERNEL_DIR/version.txt" << EOF
         PixelOS Kernel for OnePlus 12R
         设备: SM8550
         构建时间: $(date)
-        特性: SUSFS=${{ inputs.enable_susfs }}, KPM=${{ inputs.enable_kpm }}
-        配置文件: $CONFIG_FILE
-        架构: $ARCH
-        编译器: $CROSS_COMPILE
+        内核版本: $(grep "^VERSION\|^PATCHLEVEL\|^SUBLEVEL" Makefile 2>/dev/null | tr '\n' ' ')
+        配置文件: ${{ env.DEFCONFIG_NAME }}
+        架构: arm64
+        功能: SUSFS=${{ inputs.enable_susfs }}, KPM=${{ inputs.enable_kpm }}
+        构建工具: Clang/LLVM
         EOF
 
-    - name: Create ZIP Archive
+    - name: Package Kernel
       run: |
-        echo "创建ZIP压缩包..."
+        echo "打包内核..."
         
         PKG_DIR="${GITHUB_WORKSPACE}/kernel_package"
         cd "$PKG_DIR"
         
-        # 生成版本号
-        KERNEL_VERSION="$(date +%Y%m%d-%H%M%S)"
-        ZIP_NAME="PixelOS-SM8550-$KERNEL_VERSION"
+        # 生成ZIP文件名
+        DATE_TAG=$(date +%Y%m%d-%H%M%S)
+        ZIP_NAME="PixelOS-SM8550-Kernel-${DATE_TAG}"
         
         if [ "${{ inputs.enable_susfs }}" = "true" ]; then
             ZIP_NAME="${ZIP_NAME}-SUSFS"
@@ -263,24 +317,29 @@ jobs:
         ZIP_NAME="${ZIP_NAME}.zip"
         
         # 创建ZIP文件
-        zip -r9 "${GITHUB_WORKSPACE}/$ZIP_NAME" .
+        zip -r9 "${GITHUB_WORKSPACE}/${ZIP_NAME}" .
         
-        echo "✅ ZIP包创建完成: $ZIP_NAME"
-        ls -lh "${GITHUB_WORKSPACE}/$ZIP_NAME"
+        echo "✅ 打包完成: ${ZIP_NAME}"
+        ls -lh "${GITHUB_WORKSPACE}/${ZIP_NAME}"
         
-        echo "KERNEL_ZIP=$ZIP_NAME" >> $GITHUB_ENV
+        # 保存ZIP文件名
+        echo "KERNEL_ZIP=${ZIP_NAME}" >> $GITHUB_ENV
+        echo "ZIP_SIZE=$(stat -c%s "${GITHUB_WORKSPACE}/${ZIP_NAME}")" >> $GITHUB_ENV
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-build
+        path: |
+          ${{ github.workspace }}/*.zip
+          ${{ github.workspace }}/kernel_package/
 
     - name: Create Release
-      if: success()
+      if: success() && env.KERNEL_ZIP != ''
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         echo "创建GitHub发布..."
-        
-        if [ -z "$KERNEL_ZIP" ]; then
-            echo "❌ 未找到内核包"
-            exit 1
-        fi
         
         ZIP_PATH="${GITHUB_WORKSPACE}/$KERNEL_ZIP"
         
@@ -289,37 +348,40 @@ jobs:
             exit 1
         fi
         
-        # 生成版本标签
-        TAG_NAME="kernel-$(date +%Y%m%d-%H%M)"
+        # 生成发布标签
+        RELEASE_TAG="kernel-$(date +%Y%m%d)"
         
         # 创建发布说明
-        RELEASE_NOTES=$(cat << EOF
+        RELEASE_BODY=$(cat << EOF
         # PixelOS Kernel for OnePlus 12R (SM8550)
         
         ## 构建信息
         - 构建时间: $(date)
-        - 配置文件: $CONFIG_FILE
-        - 架构: $ARCH
+        - 内核版本: $(cd kernel_workspace/kernel && grep "^VERSION\|^PATCHLEVEL\|^SUBLEVEL" Makefile 2>/dev/null | tr '\n' ' ')
+        - 配置文件: ${{ env.DEFCONFIG_NAME }}
+        - 文件大小: ${{ env.ZIP_SIZE }} 字节
         
         ## 功能支持
         - SUSFS: ${{ inputs.enable_susfs }}
         - KPM: ${{ inputs.enable_kpm }}
         
-        ## 使用说明
-        1. 下载 \`$KERNEL_ZIP\`
-        2. 解压得到内核镜像和刷机脚本
-        3. 按照刷机脚本说明刷入设备
+        ## 刷机说明
+        1. 解压 \`$KERNEL_ZIP\`
+        2. 进入fastboot模式: \`adb reboot bootloader\`
+        3. 刷入内核: \`fastboot flash boot kernel.img\`
+        4. 重启: \`fastboot reboot\`
         
         ## 注意事项
-        - 刷机有风险，请提前备份重要数据
-        - 仅适用于OnePlus 12R (SM8550)设备
+        - 刷机有风险，请提前备份
+        - 仅适用于OnePlus 12R (SM8550)
+        - 确保设备已解锁Bootloader
         EOF
         )
         
-        # 创建GitHub Release
-        gh release create "$TAG_NAME" \
+        # 创建Release
+        gh release create "$RELEASE_TAG" \
             --title "PixelOS Kernel $(date +%Y%m%d)" \
-            --notes "$RELEASE_NOTES" \
+            --notes "$RELEASE_BODY" \
             "$ZIP_PATH"
         
-        echo "✅ 发布创建完成: $TAG_NAME"
+        echo "✅ 发布创建完成: $RELEASE_TAG"
