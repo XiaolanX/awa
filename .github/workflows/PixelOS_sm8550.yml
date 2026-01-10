@@ -43,7 +43,7 @@ jobs:
       if: inputs.enable_susfs
       run: |
         echo "正在设置 SUSFS 环境..."
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b ${{ inputs.susfs_branch }} susfs_patches
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b master susfs_patches
         # 复制 SUSFS 补丁到内核目录
         cp -r susfs_patches/kernel_patches/* kernel/oneplus/sm8550/
         echo "SUSFS 环境设置完成"
