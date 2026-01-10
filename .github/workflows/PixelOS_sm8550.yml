@@ -51,12 +51,15 @@ jobs:
     - name: Setup KPM Environment  
       if: inputs.enable_kpm
       run: |
-        echo "正在设置 KPM 环境..."
-        # 克隆 KPM 相关组件
-        git clone https://github.com/torvalds/linux/kernel/modules/kpm_template.git kpm_src --depth=1
-        # 复制 KPM 基础框架到内核模块目录
-        cp -r kpm_src/* kernel/oneplus/sm8550-modules/
-        echo "KPM 环境设置完成"
+  PATCH_DIR="${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/patches"
+  OUT_DIR="${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/out/Final-Image-Find"
+  cd "${OUT_DIR}"
+  cp "${PATCH_DIR}/patch_linux" .
+  chmod +x patch_linux
+  ./patch_linux
+  rm -f Image
+  mv oImage Image
+  cp Image "${GITHUB_WORKSPACE}/AnyKernel3/Image"
 
     - name: Apply SUSFS Patches
       if: inputs.enable_susfs
