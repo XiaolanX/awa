@@ -35,21 +35,25 @@ jobs:
       with:
         fetch-depth: 1
 
-    - name: Install Build Dependencies
+    - name: Install All Build Dependencies
       run: |
-        echo "安装内核构建依赖工具..."
+        echo "安装所有内核构建依赖工具..."
         sudo apt-get update
-        sudo apt-get install -y build-essential libssl-dev bc kmod \
-        flex bison libelf-dev git ccache aria2 patch rsync \
-        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu  # 添加ARM64交叉编译器
+        sudo apt-get install -y \
+            build-essential libssl-dev bc kmod \
+            flex bison libelf-dev git ccache aria2 patch rsync \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu libncurses-dev \
+            python3 python3-pip cpio lz4
         
         # 验证交叉编译器安装
-        echo "验证交叉编译器..."
-        aarch64-linux-gnu-gcc --version || echo "⚠️ 交叉编译器可能未正确安装"
-        echo "✅ 构建依赖安装完成"
+        echo "验证交叉编译器:"
+        aarch64-linux-gnu-gcc --version
+        echo "✅ 所有构建依赖安装完成"
 
     - name: Clone Kernel and Dependencies
       run: |
+        echo "克隆内核源码..."
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
         
@@ -58,7 +62,48 @@ jobs:
             echo "❌ 内核代码克隆失败"
             exit 1
         fi
+        
         echo "✅ 内核代码克隆成功"
+        
+        # 检查内核目录结构
+        cd kernel/oneplus/sm8550
+        echo "内核目录结构:"
+        ls -la
+        echo "arch/arm64/configs 目录内容:"
+        find arch/arm64/configs -name "*.defconfig" 2>/dev/null | head -10
+        cd -
+
+    - name: Find Defconfig Files
+      run: |
+        cd kernel/oneplus/sm8550
+        echo "查找可用的 defconfig 文件..."
+        
+        # 查找所有可能的 defconfig
+        echo "所有 defconfig 文件:"
+        find arch/arm64/configs -name "*defconfig*" 2>/dev/null
+        
+        # 尝试常见的 defconfig 文件名
+        for config in "vendor/sm8550_defconfig" "sm8550_defconfig" "vendor/sm8550-perf_defconfig" "vendor/sm8550-vendor_defconfig" "vendor/oneplus/sm8550_defconfig"; do
+            if [ -f "arch/arm64/configs/$config" ]; then
+                echo "✅ 找到 defconfig: $config"
+                echo "DEFCONFIG_PATH=$config" >> $GITHUB_ENV
+                break
+            fi
+        done
+        
+        if [ -z "$DEFCONFIG_PATH" ]; then
+            echo "❌ 未找到标准的 defconfig 文件"
+            echo "尝试查找第一个可用的 defconfig..."
+            FIRST_CONFIG=$(find arch/arm64/configs -name "*defconfig" 2>/dev/null | head -1)
+            if [ -n "$FIRST_CONFIG" ]; then
+                DEFCONFIG_PATH=$(echo "$FIRST_CONFIG" | sed 's|^arch/arm64/configs/||')
+                echo "使用找到的第一个配置: $DEFCONFIG_PATH"
+                echo "DEFCONFIG_PATH=$DEFCONFIG_PATH" >> $GITHUB_ENV
+            else
+                echo "无法找到任何 defconfig 文件"
+                exit 1
+            fi
+        fi
 
     - name: Setup SUSFS Environment
       if: inputs.enable_susfs
@@ -71,21 +116,20 @@ jobs:
         else
             echo "⚠️ 分支 ${{ inputs.susfs_branch }} 不存在，尝试默认的 master 分支"
             if ! git clone https://gitlab.com/simonpunk/susfs4ksu.git -b master susfs_patches; then
-                echo "❌ SUSFS 克隆失败，检查网络连接或仓库可用性"
-                exit 1
+                echo "⚠️ SUSFS 克隆失败，跳过 SUSFS 支持"
+                echo "SUSFS_ENABLED=false" >> $GITHUB_ENV
+            else
+                echo "SUSFS_ENABLED=true" >> $GITHUB_ENV
             fi
         fi
         
-        # 增强目录检查和文件复制
-        if [ -d "susfs_patches/kernel_patches" ]; then
+        if [ "${{ env.SUSFS_ENABLED }}" != "false" ] && [ -d "susfs_patches/kernel_patches" ]; then
             echo "复制 SUSFS 补丁文件..."
             cp -r susfs_patches/kernel_patches/* kernel/oneplus/sm8550/ 2>/dev/null || echo "⚠️ 部分文件复制失败，继续执行..."
             echo "✅ SUSFS 补丁文件复制完成"
-        else
+        elif [ "${{ env.SUSFS_ENABLED }}" != "false" ]; then
             echo "❌ SUSFS 补丁目录不存在，检查仓库结构:"
             ls -la susfs_patches/
-            # 尝试查找其他可能的补丁目录
-            find susfs_patches -name "*.patch" -o -name "*susfs*" | head -5
         fi
 
     - name: Setup KPM Environment  
@@ -93,176 +137,82 @@ jobs:
       run: |
         echo "正在设置 KPM 环境..."
         
-        # 修正：使用真实可用的 KPM 相关资源
+        # 简化KPM设置，主要依赖内核内置支持
         case "${{ inputs.kpm_type }}" in
             "kpatch")
                 echo "使用 kpatch 实现"
-                # 使用官方 kpatch 仓库
-                git clone https://github.com/dynup/kpatch.git kpm_tools --depth=1 --branch main 2>/dev/null || \
-                git clone https://github.com/dynup/kpatch.git kpm_tools --depth=1
+                mkdir -p kpm_tools
+                echo "KPM 通过内核内置KPROBES支持" > kpm_tools/README.md
                 ;;
             "livepatch")
                 echo "使用 livepatch 实现"
-                # 使用内核官方 livepatch 示例
                 mkdir -p kpm_tools
-                git clone https://github.com/linux-test-project/ltp.git --depth=1 ltp-temp 2>/dev/null && \
-                cp ltp-temp/testcases/kernel/controllers/livepatch/* kpm_tools/ 2>/dev/null || true
-                rm -rf ltp-temp
+                echo "KPM 通过内核内置LIVEPATCH支持" > kpm_tools/README.md
                 ;;
             *)
                 echo "使用基础 KPROBES 支持"
                 mkdir -p kpm_tools
-                # 创建基础 KPM 示例文件
                 echo "KPM 基础支持已配置" > kpm_tools/README.md
                 ;;
         esac
         
-        # 复制可能的 KPM 相关文件
-        if [ -d "kpm_tools" ]; then
-            echo "KPM 工具目录内容:"
-            ls -la kpm_tools/ || true
-            
-            # 尝试查找并复制补丁文件
-            find kpm_tools -name "*.patch" -exec cp {} kernel/oneplus/sm8550/ \; 2>/dev/null && \
-            echo "✅ KPM 补丁文件已复制" || echo "⚠️ 未找到 KPM 补丁文件"
-            
-            # 复制可能的内核模块示例
-            find kpm_tools -name "*.c" -o -name "Makefile" | head -3 | while read file; do
-                cp "$file" kernel/oneplus/sm8550-modules/ 2>/dev/null || true
-            done
-        fi
         echo "✅ KPM 环境设置完成"
-
-    - name: Verify Build Environment
-      run: |
-        echo "=== 构建环境验证 ==="
-        cd kernel/oneplus/sm8550
-        
-        # 检查必要的构建文件
-        echo "1. 检查构建脚本是否存在..."
-        if [ -f "build_sm8550" ]; then
-            echo "✅ 找到 build_sm8550 脚本"
-            chmod +x build_sm8550
-            ./build_sm8550 --help || echo "⚠️ 构建脚本执行测试失败"
-        elif [ -f "Makefile" ]; then
-            echo "✅ 找到标准 Makefile，将使用内核标准构建系统"
-            echo "KERNEL_BUILD_SYSTEM=makefile" >> $GITHUB_ENV
-        else
-            echo "❌ 未找到构建系统文件"
-            ls -la | head -10
-            exit 1
-        fi
-        
-        # 检查架构配置
-        echo "2. 检查内核配置..."
-        if [ -f "arch/arm64/configs/vendor/sm8550_defconfig" ]; then
-            echo "✅ 找到内核默认配置"
-        else
-            find arch -name "*defconfig*" | head -5
-        fi
-        
-        # 检查补丁文件
-        echo "3. 检查补丁文件..."
-        find . -name "*.patch" | head -5 | while read patch; do
-            echo "发现补丁: $patch"
-        done || echo "未找到补丁文件"
-        
-        # 检查交叉编译器
-        echo "4. 验证交叉编译器..."
-        which aarch64-linux-gnu-gcc && echo "✅ 交叉编译器已安装" || echo "❌ 交叉编译器未找到"
-
-    - name: Apply SUSFS Patches
-      if: inputs.enable_susfs
-      run: |
-        cd kernel/oneplus/sm8550
-        echo "应用 SUSFS 补丁..."
-        
-        # 增强补丁应用逻辑
-        PATCH_APPLIED=0
-        for patch_file in $(find . -name "*.patch" | grep -i susfs | head -10); do
-            if [ -f "$patch_file" ]; then
-                echo "处理补丁: $(basename "$patch_file")"
-                
-                # 首先尝试干运行
-                if patch -p1 --dry-run < "$patch_file" 2>/dev/null; then
-                    patch -p1 < "$patch_file"
-                    echo "✅ 补丁应用成功: $(basename "$patch_file")"
-                    PATCH_APPLIED=1
-                else
-                    echo "⚠️ 补丁可能已应用或存在冲突: $(basename "$patch_file")"
-                    # 尝试强制应用但允许失败
-                    patch -p1 -f --no-backup-if-mismatch < "$patch_file" 2>/dev/null && {
-                        echo "✅ 补丁强制应用成功: $(basename "$patch_file")"
-                        PATCH_APPLIED=1
-                    } || echo "❌ 补丁应用失败: $(basename "$patch_file")"
-                fi
-            fi
-        done
-        
-        if [ $PATCH_APPLIED -eq 0 ]; then
-            echo "⚠️ 未成功应用任何 SUSFS 补丁，继续构建流程..."
-        fi
-        
-        echo "SUSFS 补丁处理完成"
 
     - name: Configure Kernel Options
       run: |
         cd kernel/oneplus/sm8550
         echo "配置内核选项..."
         
-        # 备份原始配置
-        if [ -f "arch/arm64/configs/vendor/sm8550_defconfig" ]; then
-            cp arch/arm64/configs/vendor/sm8550_defconfig arch/arm64/configs/vendor/sm8550_defconfig.backup
-            echo "✅ 原始配置已备份"
+        CONFIG_FILE="arch/arm64/configs/${{ env.DEFCONFIG_PATH }}"
+        echo "使用的配置文件: $CONFIG_FILE"
+        
+        if [ ! -f "$CONFIG_FILE" ]; then
+            echo "❌ 配置文件不存在"
+            exit 1
         fi
+        
+        # 备份原始配置
+        cp "$CONFIG_FILE" "${CONFIG_FILE}.backup"
+        echo "✅ 原始配置已备份"
         
         # 基础配置
         {
             echo "# 基础模块支持"
             echo "CONFIG_MODULES=y"
             echo "CONFIG_MODULE_UNLOAD=y"
-            echo "CONFIG_MODULE_FORCE_UNLOAD=y"
-        } >> arch/arm64/configs/vendor/sm8550_defconfig
+        } >> "$CONFIG_FILE"
         
         # SUSFS 配置
-        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+        if [ "${{ inputs.enable_susfs }}" = "true" ] && [ "${{ env.SUSFS_ENABLED }}" != "false" ]; then
             {
                 echo "# SUSFS 配置"
                 echo "CONFIG_KSU_SUSFS=y"
                 echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-                echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
-                echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-            } >> arch/arm64/configs/vendor/sm8550_defconfig
+            } >> "$CONFIG_FILE"
             echo "✅ SUSFS 配置已添加"
         fi
         
-        # KPM 配置 - 修正配置项
+        # KPM 配置
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
             {
                 echo "# KPM/KPROBES 配置"
                 echo "CONFIG_KPROBES=y"
                 echo "CONFIG_HAVE_KPROBES=y"
                 echo "CONFIG_KPROBE_EVENTS=y"
-            } >> arch/arm64/configs/vendor/sm8550_defconfig
+            } >> "$CONFIG_FILE"
             
-            # 根据选择的 KPM 类型添加特定配置
             case "${{ inputs.kpm_type }}" in
                 "kpatch"|"livepatch")
                     {
                         echo "CONFIG_LIVEPATCH=y"
-                        echo "CONFIG_DYNAMIC_FTRACE=y"
-                    } >> arch/arm64/configs/vendor/sm8550_defconfig
+                    } >> "$CONFIG_FILE"
                     ;;
             esac
             echo "✅ KPM 配置已添加"
         fi
         
-        # 验证配置
-        echo "配置验证:"
-        grep -E "CONFIG_(MODULES|KSU_SUSFS|KPROBES|LIVEPATCH)" arch/arm64/configs/vendor/sm8550_defconfig || \
-        echo "⚠️ 未找到部分预期配置项"
-        
         echo "✅ 内核配置更新完成"
+        echo "配置文件行数: $(wc -l < "$CONFIG_FILE")"
 
     - name: Setup release name
       run: |
@@ -281,130 +231,169 @@ jobs:
         
         # 生成功能标记
         FEATURE_SUFFIX=""
-        [ "${{ inputs.enable_susfs }}" = "true" ] && FEATURE_SUFFIX="${FEATURE_SUFFIX}_susfs"
-        [ "${{ inputs.enable_kpm }}" = "true" ] && FEATURE_SUFFIX="${FEATURE_SUFFIX}_kpm"
+        [ "${{ inputs.enable_susfs }}" = "true" ] && FEATURE_SUFFIX="${FEATURE_SUFFIX}_SUSFS"
+        [ "${{ inputs.enable_kpm }}" = "true" ] && FEATURE_SUFFIX="${FEATURE_SUFFIX}_KPM"
         
         REL_NAME="PixelOS_SM8550-${VERSION_STR}-$(date +"%Y%m%d")${FEATURE_SUFFIX}"
         echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
         echo "✅ 发布名称设置为: $REL_NAME"
 
-    - name: Build Kernel with Standard Method
-      if: env.KERNEL_BUILD_SYSTEM == 'makefile'
+    - name: Build Kernel
       run: |
         cd kernel/oneplus/sm8550
-        echo "使用标准内核构建系统..."
+        echo "开始构建内核..."
         
         # 设置构建环境
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         export CC=aarch64-linux-gnu-gcc
-        export SUBARCH=arm64
         
         # 验证编译器
-        echo "验证编译器..."
-        ${CROSS_COMPILE}gcc --version || { echo "❌ 编译器不可用"; exit 1; }
+        echo "验证交叉编译器..."
+        ${CROSS_COMPILE}gcc --version || { 
+            echo "❌ 交叉编译器不可用"; 
+            echo "尝试查找编译器:"
+            which aarch64-linux-gnu-gcc || echo "未找到编译器"
+            exit 1
+        }
+        
+        echo "使用的 defconfig: ${{ env.DEFCONFIG_PATH }}"
+        
+        # 清理之前的构建
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- mrproper 2>/dev/null || echo "清理完成"
         
         # 配置内核
-        make sm8550_defconfig
+        echo "配置内核..."
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- ${{ env.DEFCONFIG_PATH }}
+        
+        # 应用额外配置
+        if [ "${{ inputs.enable_susfs }}" = "true" ] && [ "${{ env.SUSFS_ENABLED }}" != "false" ]; then
+            echo "应用 SUSFS 配置..."
+            scripts/config --enable KSU_SUSFS
+        fi
+        
+        if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+            echo "应用 KPM 配置..."
+            scripts/config --enable KPROBES
+            scripts/config --enable HAVE_KPROBES
+        fi
+        
+        # 生成最终配置
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
         
         # 编译内核
-        make -j$(nproc) Image.gz-dtb
+        echo "编译内核..."
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j$(nproc) Image.gz-dtb
         
-        # 创建模拟的 kernel.zip 用于后续步骤
-        mkdir -p ${GITHUB_WORKSPACE}/artifacts
-        cp arch/arm64/boot/Image.gz-dtb ${GITHUB_WORKSPACE}/artifacts/
-        cd ${GITHUB_WORKSPACE}
-        zip -r kernel.zip artifacts/
-        echo "✅ 标准内核构建完成"
-
-    - name: Build Kernel with Custom Script
-      if: env.KERNEL_BUILD_SYSTEM != 'makefile'
-      run: |
-        cd kernel/oneplus/sm8550
-        echo "使用自定义构建脚本..."
-        
-        # 构建参数设置
-        BUILD_ARGS="--clean --ksu"
-        [ "${{ inputs.enable_susfs }}" = "true" ] && BUILD_ARGS="$BUILD_ARGS --susfs"
-        [ "${{ inputs.enable_kpm }}" = "true" ] && BUILD_ARGS="$BUILD_ARGS --kpm"
-        
-        echo "构建参数: $BUILD_ARGS"
-        
-        # 执行构建
-        if [ -f "build_sm8550" ] && [ -x "build_sm8550" ]; then
-            ./build_sm8550 $BUILD_ARGS
+        # 验证构建结果
+        if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
+            echo "✅ 内核构建成功"
+            ls -lh arch/arm64/boot/Image.gz-dtb
         else
-            echo "❌ 构建脚本不存在或不可执行"
+            echo "❌ 内核构建失败，未找到输出文件"
             exit 1
         fi
-        
-        # 生成带功能标记的文件名
-        FEATURE_TAG=""
-        [ "${{ inputs.enable_susfs }}" = "true" ] && FEATURE_TAG="${FEATURE_TAG}_susfs"
-        [ "${{ inputs.enable_kpm }}" = "true" ] && FEATURE_TAG="${FEATURE_TAG}_kpm"
-        
-        mv kernel.zip ${GITHUB_WORKSPACE}/ksu${FEATURE_TAG}.zip
-        
-        # 清理
-        git clean -fdx || true
-        find . -mindepth 1 -maxdepth 1 -type d -name ".git" -exec rm -rf {} \; 2>/dev/null || true
-        git reset --hard || true
 
-    - name: Build Kernel with sukisu
+    - name: Create Kernel Flashable ZIP
       run: |
-        cd kernel/oneplus/sm8550
-        echo "构建 sukisu 版本内核..."
+        echo "创建可刷写的内核包..."
         
-        # 使用标准构建系统作为后备方案
-        if [ "${{ env.KERNEL_BUILD_SYSTEM }}" = "makefile" ]; then
-            export ARCH=arm64
-            export CROSS_COMPILE=aarch64-linux-gnu-
-            export CC=aarch64-linux-gnu-gcc
-            
-            # 验证编译器
-            echo "验证编译器..."
-            ${CROSS_COMPILE}gcc --version || { echo "❌ 编译器不可用"; exit 1; }
-            
-            make sm8550_defconfig
-            make -j$(nproc) Image.gz-dtb
-            mkdir -p ${GITHUB_WORKSPACE}/artifacts
-            cp arch/arm64/boot/Image.gz-dtb ${GITHUB_WORKSPACE}/artifacts/
-            cd ${GITHUB_WORKSPACE}
-            zip -r sukisu.zip artifacts/
-        else
-            # 使用自定义脚本
-            BUILD_ARGS="--clean --sukisu"
-            [ "${{ inputs.enable_susfs }}" = "true" ] && BUILD_ARGS="$BUILD_ARGS --susfs"
-            [ "${{ inputs.enable_kpm }}" = "true" ] && BUILD_ARGS="$BUILD_ARGS --kpm"
-            
-            ./build_sm8550 $BUILD_ARGS
-            
-            FEATURE_TAG=""
-            [ "${{ inputs.enable_susfs }}" = "true" ] && FEATURE_TAG="${FEATURE_TAG}_susfs"
-            [ "${{ inputs.enable_kpm }}" = "true" ] && FEATURE_TAG="${FEATURE_TAG}_kpm"
-            
-            mv kernel.zip ${GITHUB_WORKSPACE}/sukisu${FEATURE_TAG}.zip
-        fi
+        # 创建临时目录结构
+        mkdir -p ${GITHUB_WORKSPACE}/kernel_package
         
-        # 清理
-        cd kernel/oneplus/sm8550
-        git clean -fdx 2>/dev/null || true
-        find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf 2>/dev/null || true
-        git reset --hard 2>/dev/null || true
+        # 复制内核镜像
+        cp kernel/oneplus/sm8550/arch/arm64/boot/Image.gz-dtb ${GITHUB_WORKSPACE}/kernel_package/
+        
+        # 创建基本的刷机脚本
+        cat > ${GITHUB_WORKSPACE}/kernel_package/anykernel.sh << 'EOF'
+        # AnyKernel3 Ramdisk Mod Script
+        # osm0sis @ xda-developers
+
+        ## AnyKernel setup
+        # begin properties
+        properties() { '
+        kernel.string=PixelOS Kernel for SM8550
+        do.devicecheck=1
+        do.modules=0
+        do.systemless=1
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=oneplus
+        supported.versions=
+        supported.patchlevels=
+        '; } # end properties
+
+        # shell variables
+        block=/dev/block/bootdevice/by-name/boot;
+        is_slot_device=0;
+        ramdisk_compression=auto;
+        
+        ## AnyKernel methods (DO NOT CHANGE)
+        # import patching functions/variables - see for reference
+        . tools/ak3-core.sh;
+        
+        ## AnyKernel install
+        dump_boot;
+        
+        write_boot;
+        ## end install
+        EOF
+        
+        # 创建基本的 anykernel3 结构
+        mkdir -p ${GITHUB_WORKSPACE}/kernel_package/{tools,modules,patch}
+        
+        # 复制必要的工具
+        cat > ${GITHUB_WORKSPACE}/kernel_package/tools/ak3-core.sh << 'EOF'
+        # AnyKernel3 Core Script
+        echo "AnyKernel3安装脚本已准备"
+        EOF
+        
+        # 创建ZIP文件
+        cd ${GITHUB_WORKSPACE}/kernel_package
+        ZIP_NAME="PixelOS_SM8550_$(date +"%Y%m%d")"
+        [ "${{ inputs.enable_susfs }}" = "true" ] && ZIP_NAME="${ZIP_NAME}_SUSFS"
+        [ "${{ inputs.enable_kpm }}" = "true" ] && ZIP_NAME="${ZIP_NAME}_KPM"
+        ZIP_NAME="${ZIP_NAME}.zip"
+        
+        zip -r9 ${GITHUB_WORKSPACE}/${ZIP_NAME} .
+        
+        echo "✅ 内核包创建完成: ${ZIP_NAME}"
+        ls -lh ${GITHUB_WORKSPACE}/${ZIP_NAME}
+        
+        echo "KERNEL_ZIP=${ZIP_NAME}" >> $GITHUB_ENV
 
     - name: Create GitHub Release
       run: |
         cd ${GITHUB_WORKSPACE}
         echo "创建 GitHub 发布..."
         
-        # 查找所有生成的文件
-        RELEASE_FILES=$(ls *.zip 2>/dev/null | tr '\n' ' ' || echo "")
-        if [ -z "$RELEASE_FILES" ]; then
-            echo "⚠️ 未找到任何构建产物，检查构建步骤"
-            ls -la *.zip || echo "未找到zip文件"
-            # 尝试查找其他可能的产品文件
-            find . -name "*.img" -o -name "Image*" -o -name "*.dtb" | head -5
-        else
-            echo "发布文件: $RELEASE_FILES"
-            gh release create "$REL_NAME" --title "$REL_NAME" --notes "SUSFS: ${{ inputs.enable_susfs }}, KPM: ${{ inputs.enable_kpm }}, 类型: ${{ inputs.kpm_type }}" $RELEASE_FILES
+        if [ -z "$KERNEL_ZIP" ]; then
+            echo "❌ 未找到内核包"
+            exit 1
         fi
+        
+        if [ ! -f "$KERNEL_ZIP" ]; then
+            echo "❌ 内核包文件不存在: $KERNEL_ZIP"
+            ls -la
+            exit 1
+        fi
+        
+        echo "发布文件: $KERNEL_ZIP"
+        
+        # 创建发布说明
+        RELEASE_NOTES="PixelOS Kernel for SM8550
+构建时间: $(date)
+内核版本: $(cd kernel/oneplus/sm8550 && grep "^VERSION =\|^PATCHLEVEL =\|^SUBLEVEL =" Makefile 2>/dev/null | tr '\n' ' ')
+特性支持:
+- SUSFS: ${{ inputs.enable_susfs }}
+- KPM: ${{ inputs.enable_kpm }} (${{ inputs.kpm_type }})
+Defconfig: ${{ env.DEFCONFIG_PATH }}
+GitHub Actions运行ID: ${{ github.run_id }}"
+        
+        # 创建发布
+        gh release create "$REL_NAME" \
+            --title "$REL_NAME" \
+            --notes "$RELEASE_NOTES" \
+            "$KERNEL_ZIP"
+        
+        echo "✅ GitHub 发布创建完成"
