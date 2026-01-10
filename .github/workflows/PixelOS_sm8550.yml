@@ -6,7 +6,7 @@ on:
       kernel_version:
         description: '内核版本（适配一加ACE3）'
         required: true
-        default: '5.15.146' # 一加ACE3适配的内核基线版本
+        default: '5.15.196' # 一加ACE3适配的内核基线版本
       build_type:
         description: '编译类型 (release/debug)'
         required: true
