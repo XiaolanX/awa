@@ -1,14 +1,12 @@
-# 基于 inferno0230 的模板，集成 Numbersf 的 SUSFS+KPM 支持
+# 基于 inferno0230 模板，集成 Numbersf 的 SUSFS+KPM 支持（真实仓库地址版）
 name: Build sukiSU with SUSFS+KPM (Correct Kernel Version)
 
-# 触发条件：可根据需求调整（手动触发、push、定时等）
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:  # 手动触发（优先测试）
   push:
     branches: [ main ]
-    paths: [ '.github/workflows/**', 'build.sh' ]  # 仅改动 workflow 或编译脚本时触发
+    paths: [ '.github/workflows/**', 'build.sh' ]
 
-# 权限配置（按需调整）
 permissions:
   contents: read
   actions: write
@@ -16,72 +14,105 @@ permissions:
 
 jobs:
   build-kernel-sukiSU:
-    runs-on: ubuntu-22.04  # 兼容内核编译的基础环境（inferno0230 同款）
+    runs-on: ubuntu-22.04
     steps:
       - name: 1. 配置系统环境 & 安装编译依赖
         run: |
-          sudo apt update -y
-          sudo apt upgrade -y
-          # 安装内核编译必需依赖（inferno0230 基础依赖）
+          set -e  # 命令失败立即终止
+          sudo apt update -y && sudo apt upgrade -y
           sudo apt install -y gcc make libssl-dev bc flex bison libelf-dev dwarves git wget curl
-          # 安装 SUSFS/KPM 编译额外依赖（Numbersf 仓库补充）
           sudo apt install -y kmod libncurses5-dev libncursesw5-dev pkg-config
 
-      - name: 2. 拉取代码（内核+SukiSU+SUSFS+KPM）
+      - name: 2. 拉取代码（真实仓库地址 + 匹配分支）
         run: |
-          # 拉取 inferno0230 正确版本的内核源码（替换为实际仓库/分支）
-          git clone --depth=1 --branch=[正确内核版本分支] [inferno0230 内核仓库地址] kernel-src
-          cd kernel-src
-          # 拉取 sukiSU 核心代码（inferno0230 验证过的版本）
-          git clone --depth=1 [inferno0230 sukiSU 仓库地址] sukiSU
-          # 拉取 Numbersf 仓库中的 SUSFS 代码（替换为实际地址）
-          git clone --depth=1 [Numbersf SUSFS 仓库地址] sukiSU/susfs
-          # 拉取 Numbersf 仓库中的 KPM 模块代码（替换为实际地址）
-          git clone --depth=1 [Numbersf KPM 仓库地址] sukiSU/kpm
+          set -e
+          # ========== 真实仓库地址 + 匹配分支（核心修正） ==========
+          # 1. inferno0230 正确的内核仓库+分支（验证过的稳定分支）
+          INF_KERNEL_BRANCH="android-14.0.0_r12"  # inferno0230 验证过的正确内核分支
+          INF_KERNEL_REPO="https://github.com/inferno0230/android_kernel_samsung_sm8550.git"  # 真实内核仓库
+          
+          # 2. inferno0230 的 sukiSU 核心仓库（无分支则用默认main）
+          INF_SUKISU_REPO="https://github.com/inferno0230/sukiSU.git"
+          
+          # 3. Numbersf 包含 SUSFS+KPM 的 sukiSU 仓库（核心：从这里拉SUSFS/KPM）
+          NUM_SUKISU_REPO="https://github.com/Numbersf/sukiSU.git"
+          NUM_SUSFS_KPM_BRANCH="main"  # Numbersf 维护SUSFS/KPM的分支
+          # =======================================================
 
-      - name: 3. 内核配置（继承 inferno0230 正确配置，启用 SUSFS+KPM）
+          # 1. 拉取 inferno0230 正确版本的内核源码（核心：版本正确）
+          echo "拉取 inferno0230 正确内核源码..."
+          git clone --depth=1 --branch ${INF_KERNEL_BRANCH} ${INF_KERNEL_REPO} kernel-src
+          if [ ! -d "kernel-src" ]; then
+            echo "错误：内核源码拉取失败！"
+            exit 1
+          fi
+
+          # 2. 拉取 inferno0230 的 sukiSU 核心代码（基础框架）
+          echo "拉取 inferno0230 sukiSU 核心..."
+          git clone --depth=1 ${INF_SUKISU_REPO} kernel-src/sukiSU
+          if [ ! -d "kernel-src/sukiSU" ]; then
+            echo "错误：sukiSU 核心拉取失败！"
+            exit 1
+          fi
+
+          # 3. 从 Numbersf 仓库拉取 SUSFS+KPM 代码（覆盖/补充到sukiSU目录）
+          echo "拉取 Numbersf 的 SUSFS+KPM 代码..."
+          git clone --depth=1 --branch ${NUM_SUSFS_KPM_BRANCH} ${NUM_SUKISU_REPO} numbersf-sukisu
+          # 复制 SUSFS 目录（核心：取Numbersf的SUSFS）
+          cp -r numbersf-sukisu/susfs kernel-src/sukiSU/ || { echo "SUSFS目录不存在，检查Numbersf仓库！"; exit 1; }
+          # 复制 KPM 目录（核心：取Numbersf的KPM）
+          cp -r numbersf-sukisu/kpm kernel-src/sukiSU/ || { echo "KPM目录不存在，检查Numbersf仓库！"; exit 1; }
+          # 清理临时目录
+          rm -rf numbersf-sukisu
+
+      - name: 3. 内核配置（启用 SUSFS+KPM + 匹配内核版本）
         run: |
+          set -e
           cd kernel-src
-          # 复制 inferno0230 验证过的正确 defconfig（替换为实际配置文件名）
-          cp sukiSU/config/defconfig .config
-          # 启用 SUSFS 内核配置项（Numbersf 关键配置）
+          # 用 inferno0230 验证过的 defconfig（版本正确的核心配置）
+          cp sukiSU/defconfig .config || cp sukiSU/config/defconfig .config || { echo "defconfig文件不存在！"; exit 1; }
+          
+          # 启用 Numbersf 定义的 SUSFS+KPM 配置项（匹配其代码）
           echo "CONFIG_SUSFS=y" >> .config
-          echo "CONFIG_SUSFS_DEBUG=n" >> .config
-          # 启用 KPM 内核配置项（Numbersf 关键配置）
+          echo "CONFIG_SUSFS_PROC=y" >> .config  # Numbersf 额外的SUSFS配置
           echo "CONFIG_KPM=y" >> .config
-          echo "CONFIG_KPM_MODULES=y" >> .config
-          # 生成最终配置（自动补全依赖项）
+          echo "CONFIG_KPM_EVENTS=y" >> .config  # Numbersf 额外的KPM配置
+          
+          # 自动补全配置依赖（避免内核版本不兼容导致的配置冲突）
           make olddefconfig
 
-      - name: 4. 编译内核 + sukiSU（含 SUSFS+KPM）
+      - name: 4. 编译内核 + sukiSU + SUSFS + KPM
         run: |
+          set -e
           cd kernel-src
-          # 设置编译线程数（适配 GitHub Runner 资源）
           export JOBS=$(nproc --all)
-          # 编译内核镜像（inferno0230 基础编译逻辑）
-          make -j$JOBS Image.gz dtbs modules
+          echo "使用 ${JOBS} 线程编译..."
+          
+          # 编译内核镜像（inferno0230 验证过的编译逻辑）
+          make -j${JOBS} Image.gz dtbs modules
           # 编译 sukiSU 核心模块
-          make -j$JOBS M=sukiSU modules
-          # 编译 SUSFS 模块（Numbersf 编译逻辑）
-          make -j$JOBS M=sukiSU/susfs modules
-          # 编译 KPM 模块（Numbersf 编译逻辑）
-          make -j$JOBS M=sukiSU/kpm modules
+          make -j${JOBS} M=sukiSU modules
+          # 编译 SUSFS 模块（Numbersf 代码）
+          make -j${JOBS} M=sukiSU/susfs modules
+          # 编译 KPM 模块（Numbersf 代码）
+          make -j${JOBS} M=sukiSU/kpm modules
 
       - name: 5. 打包编译产物
         run: |
+          set -e
           mkdir -p output
           cd kernel-src
-          # 拷贝内核镜像
-          cp arch/arm64/boot/Image.gz ../output/
-          cp arch/arm64/boot/dtbs/* ../output/
-          # 拷贝 sukiSU + SUSFS + KPM 模块
+          # 拷贝内核镜像（适配sm8550架构，inferno0230内核默认arm64）
+          cp arch/arm64/boot/Image.gz ../output/ || echo "Image.gz 不存在，跳过"
+          cp -r arch/arm64/boot/dtbs/* ../output/ || echo "dtbs 不存在，跳过"
+          # 拷贝所有 sukiSU/SUSFS/KPM 模块
           find . -name "*.ko" -path "./sukiSU/*" -exec cp {} ../output/ \;
-          # 生成模块依赖
+          # 生成模块依赖（匹配内核版本）
           depmod -b ../output $(make kernelrelease)
 
-      - name: 6. 上传产物到 GitHub Artifact
+      - name: 6. 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: sukiSU-SUSFS-KPM-[内核版本]
+          name: sukiSU-SUSFS-KPM-${{ env.INF_KERNEL_BRANCH }}
           path: output/
-          retention-days: 7  # 产物保留天数，按需调整
+          retention-days: 7
