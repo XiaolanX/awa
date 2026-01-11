@@ -1,11 +1,11 @@
-name: PixelOS_GKI_Ultimate_CI_v2
+name: GKI_Kernel_Ultimate_CI
 
 on:
   workflow_dispatch:
 
 jobs:
-  Build_Kernel:
-    name: Build GKI with SUSFS & KPM
+  GKI_Build:
+    name: GKI Ultimate Build
     runs-on: ubuntu-latest
     
     steps:
@@ -17,90 +17,68 @@ jobs:
         remove-dotnet: 'true'
         remove-android: 'true'
 
-    - name: Setup Environment
+    - name: Setup Build Environment
       run: |
         sudo apt-get update
         sudo apt-get install -y bc build-essential flex bison binfmt-support libssl-dev libelf-dev clang llvm lld python3-pip git-lfs
+        # 安装编译 GKI 必备的工具
         pip3 install setuptools
 
-    - name: Clone Kernel Source
+    - name: Clone GKI Source
       run: |
-        # 克隆一加 12R 内核源码 (SM8550)
+        # 克隆主内核 (假设为 5.15 分支)
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/sm8550
+        # 克隆 SUSFS 补丁
+        git clone https://gitlab.com/khiz_zy/susfs_patches.git --depth=1 susfs_src
 
-    - name: Get SUSFS & KPM (GitHub Mirror Mode)
-      run: |
-        # 放弃 GitLab，改用 GitHub 上的镜像或者直接 clone
-        # 即使 GitLab 报错，GitHub 镜像通常很稳
-        git clone https://github.com/sidex15/susfs_patches.git --depth=1 susfs_src
-        
-        # 获取 KPM 源码
-        mkdir -p kernel/sm8550/drivers/kpm
-        curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
-        # 尝试拿一下 KPM 的核心源码文件，防止编译找不到符号
-        curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/kpm.c -o kernel/sm8550/drivers/kpm/kpm.c
-
-    - name: Surgical Integration
+    - name: Patching SUSFS & KPM
       run: |
         cd kernel/sm8550
         
-        echo "--- 注入 SUSFS 补丁 ---"
-        # 针对 5.15 内核应用补丁 (从镜像仓库路径进入)
-        # 注意：镜像仓库结构可能略有不同，这里用 find 确保万无一失
-        SUS_PATCH=$(find ../../susfs_src -name "5.15_add_susfs_in_kernel.patch" | head -n 1)
-        patch -p1 < "$SUS_PATCH" || echo "补丁打入失败，可能是版本略有差异，建议手动检查日志"
+        echo "--- 正在为 GKI 注入 SUSFS ---"
+        # 应用 5.15 的内核补丁
+        cp ../../susfs_src/Kernel_Patches/5.15/* ./
+        patch -p1 < 5.15_add_susfs_in_kernel.patch || echo "警告：部分补丁需手动确认"
+
+        # 注入 SUSFS 相关的头文件
+        cp ../../susfs_src/Kernel_Patches/Include/linux/* ./include/linux/
         
-        # 移动关键头文件
-        SUS_H=$(find ../../susfs_src -name "susfs.h" | head -n 1)
-        mkdir -p include/linux/
-        cp "$SUS_H" include/linux/
-        
-        echo "--- 注入 KPM 编译项 ---"
-        if ! grep -q "obj-y += kpm/" drivers/Makefile; then
-          echo "obj-y += kpm/" >> drivers/Makefile
-        fi
+        echo "--- 正在注入 KPM ---"
+        # 将 KPM 源码集成到内核树
+        git clone https://github.com/rifsxd/KPM.git --depth=1 ../kpm_src
+        mkdir -p drivers/kpm
+        cp -r ../kpm_src/kpm/* drivers/kpm/
+        # 修改 Makefile 使其参与编译
+        echo "obj-y += kpm/" >> drivers/Makefile
 
     - name: Configure GKI Defconfig
       run: |
         cd kernel/sm8550
+        # 针对 GKI 核心配置进行注入
         GKI_CONF="arch/arm64/configs/gki_defconfig"
-        [ -f "$GKI_CONF" ] || GKI_CONF=$(find arch/arm64/configs -name "gki_defconfig" | head -n 1)
-        
-        echo "正在配置: $GKI_CONF"
-        # 强制开启必要选项
-        sed -i '/CONFIG_KSU/d' "$GKI_CONF" # 先删掉旧的，防止冲突
-        {
-          echo "CONFIG_KSU=y"
-          echo "CONFIG_KSU_SUSFS=y"
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KPROBE=y"
-          echo "CONFIG_KPM=y"
-        } >> "$GKI_CONF"
+        echo "CONFIG_KSU_SUSFS=y" >> $GKI_CONF
+        echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $GKI_CONF
+        echo "CONFIG_KPM=y" >> $GKI_CONF
+        # 如果你用的是 KSU-Next，通常需要这个
+        echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KPROBE=y" >> $GKI_CONF
 
     - name: Build GKI Kernel
       run: |
         cd kernel/sm8550
-        # 如果编译 SM8550 报 Clang 错误，可能需要 AOSP 的特定 Clang 版本
-        # 暂时使用 Ubuntu 自带的 LLVM 尝试
-        make ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 gki_defconfig
-        make ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 -j$(nproc) Image.gz
+        # GKI 模式下，如果你的 build_sm8550 支持，可以直接调用
+        # 如果不支持，这里建议使用标准的编译指令：
+        # 这里假设你已经处理好了 Clang 环境变量
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 O=out gki_defconfig
+        make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LLVM=1 LLVM_IAS=1 O=out -j$(nproc) Image.gz
         
-        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          mv out/arch/arm64/boot/Image.gz ${GITHUB_WORKSPACE}/PixelOS-GKI-Ultimate.gz
-        else
-          echo "编译失败！请检查日志中的 Clang 错误"
-          exit 1
-        fi
+        # 将生成的 GKI 镜像打包
+        mv out/arch/arm64/boot/Image.gz ${GITHUB_WORKSPACE}/GKI-Ultimate-SUSFS.gz
 
-    - name: Upload Release
+    - name: Release Kernel
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: "GKI-Ultimate-${{ github.run_id }}"
-        name: "PixelOS GKI Ultimate (Stable Source)"
-        body: |
-          - Kernel: OnePlus 12R (SM8550)
-          - Features: KSUN + SUSFS + KPM
-          - Build Time: ${{ github.event.repository.updated_at }}
+        tag_name: "GKI-v5.15-${{ github.run_id }}"
+        name: "GKI Ultimate (SUSFS + KPM)"
         files: |
           *.gz
       env:
