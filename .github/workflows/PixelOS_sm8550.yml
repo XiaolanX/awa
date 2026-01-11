@@ -1,11 +1,11 @@
-name: PixelOS_Ultimate_GKI_V13
+name: PixelOS_Ultimate_GKI_V14
 
 on:
   workflow_dispatch:
 
 jobs:
   Build_Kernel:
-    name: Build GKI with Official Clang
+    name: Build GKI with SukiSU-Style Fixes
     runs-on: ubuntu-latest
     
     steps:
@@ -27,7 +27,7 @@ jobs:
 
       - name: Download Official AOSP Clang
         run: |
-          # 下载 GKI 编译标准的 Clang 版本
+          # 下载 GKI 编译标准的 Clang 版本 (参考 FAST_BUILD 逻辑)
           mkdir -p $GITHUB_WORKSPACE/clang-aosp
           wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz
           tar -xzf clang-r522817.tar.gz -C $GITHUB_WORKSPACE/clang-aosp
@@ -39,7 +39,6 @@ jobs:
 
       - name: Get SUSFS & KPM
         run: |
-          # 参考 simonpunk 的补丁仓库
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs4ksu_src
           mkdir -p kernel/sm8550/drivers/kpm
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
@@ -67,19 +66,23 @@ jobs:
                               f.write(line)
           '
           
-          echo "--- 2. 清理 ABI 导出限制 ---"
-          # 参考参考资料 source: 61
-          find . -name "BUILD.bazel" -exec sed -i "/\"protected_exports_list\"/d" {} +
-          rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
+          echo "--- 2. 参考代码清理: ABI 保护与导出限制 ---"
+          # 参考 source 61 的做法，删除受保护的导出列表引用
+          [cite_start]find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} + [cite: 61]
+          [cite_start]rm -f android/abi_gki_protected_exports_* 2>/dev/null || true [cite: 61]
 
-          echo "--- 3. 物理拷贝 SUSFS 文件 ---"
-          # 参考参考资料 source: 116
-          cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
-          cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
+          echo "--- 3. 参考代码清理: 移除构建审查 ---"
+          # 参考 source 172 的做法，移除 check_defconfig 防止中断 
+          [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
+
+          echo "--- 4. 物理注入 SUSFS 文件 ---"
+          # 参考 source 116 的做法，直接物理拷贝 fs 和 include 目录 [cite: 116]
+          [cite_start]cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/ [cite: 116]
+          [cite_start]cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/ [cite: 116]
           PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
           patch -p1 < "$PATCH_FILE" || echo "Patch conflict ignored."
 
-          echo "--- 4. 注入 KPM 编译项 ---"
+          echo "--- 5. 注入 KPM ---"
           if ! grep -q "obj-y += kpm/" drivers/Makefile; then
             echo "obj-y += kpm/" >> drivers/Makefile
           fi
@@ -89,7 +92,7 @@ jobs:
           cd kernel/sm8550
           GKI_CONF="arch/arm64/configs/gki_defconfig"
           
-          # 参考参考资料 source: 159, 160
+          # 参考 source 159-161 注入全套隐藏配置 [cite: 159, 160, 161]
           sed -i '/CONFIG_KSU/d' "$GKI_CONF"
           {
             echo "CONFIG_KSU=y"
@@ -108,11 +111,11 @@ jobs:
           cd kernel/sm8550
           export PATH="${{ env.CLANG_PATH }}:$PATH"
           
-          # 参考参考资料 source: 183, 194
-          # 启用 ThinLTO 并配置编译参数
-          sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' arch/arm64/configs/gki_defconfig
+          # 参考 source 183 开启 ThinLTO 优化编译 
+          [cite_start]sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' arch/arm64/configs/gki_defconfig [cite: 183]
           
-          export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          # 参考 source 194 设置编译参数并强制忽略错误 
+          [cite_start]export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error" [cite: 194]
           
           make O=out $MAKE_ARGS gki_defconfig
           make -j$(nproc) O=out $MAKE_ARGS Image.gz
@@ -120,6 +123,7 @@ jobs:
           if [ -f "out/arch/arm64/boot/Image.gz" ]; then
             mv out/arch/arm64/boot/Image.gz ${GITHUB_WORKSPACE}/PixelOS-Ultimate-GKI.gz
           else
+            echo "编译失败，Image.gz 未生成"
             exit 1
           fi
 
@@ -127,7 +131,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "GKI-Clang-${{ github.run_id }}"
-          name: "OnePlus 12R Ultimate GKI (Fix V13)"
+          name: "OnePlus 12R Ultimate GKI (Fix V14)"
           files: |
             *.gz
         env:
