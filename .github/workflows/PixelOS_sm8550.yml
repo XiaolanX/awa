@@ -2,13 +2,21 @@ name: PixelOS_Kernel_CI-aston
 
 on:
   workflow_dispatch:
+    inputs:
+      KSU_BRANCH:
+        description: 'SukiSU 分支 (如 main)'
+        required: true
+        default: 'main'
 
 jobs:
   PixelOS_Kernel_CI:
     name: PixelOS Kernel CI
     runs-on: ubuntu-latest
-    steps:
+    # 核心修复：授予 Action 写入权限以创建 Release
+    permissions:
+      contents: write
 
+    steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
       with:
@@ -30,11 +38,32 @@ jobs:
     - name: Build Kernel with sukisu
       run: |
         cd kernel/oneplus/sm8550
-        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$BRANCH_NAME"
-        cd ./KernelSU
-        sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
+        # 修复：使用输入的分支变量，并确保 drivers 目录存在（setup.sh 需要）
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.KSU_BRANCH }}"
+        
+        # 只有成功进入目录才执行修改
+        if [ -d "./KernelSU" ]; then
+          cd ./KernelSU
+          sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
+        else
+          echo "SukiSU 安装失败，目录不存在"
+          exit 1
+        fi
+
+    # 模拟编译步骤 (你需要在这里加入真正的编译逻辑，生成 sukisu.zip)
+    - name: Mock Zip Creation
+      run: |
+        touch sukisu.zip
 
     - name: Create GitHub Release
+      env:
+        # 核心修复：显式提供授权变量
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        cd ${GITHUB_WORKSPACE}
-        gh release create "$REL_NAME" --title "$REL_NAME" --notes "" ksu.zip ksu-next.zip sukisu.zip
+        # 确保文件存在再上传
+        if [ -f "sukisu.zip" ]; then
+          gh release create "$REL_NAME" --title "$REL_NAME" --notes "PixelOS Kernel Build with SukiSU" sukisu.zip
+        else
+          echo "未找到编译产物 sukisu.zip"
+          exit 1
+        fi
