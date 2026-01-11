@@ -1,4 +1,4 @@
-name: PixelOS_Ultimate_GKI_V3
+name: PixelOS_Ultimate_GKI_V4
 
 on:
   workflow_dispatch:
@@ -25,46 +25,42 @@ jobs:
 
     - name: Clone Kernel Source
       run: |
-        # 克隆一加 12R (sm8550) 源码 [cite: 23]
+        # 克隆一加 12R (sm8550) 源码
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/sm8550
 
-    - name: Get SUSFS & KPM (Reference Style)
+    - name: Get SUSFS & KPM
       run: |
-        # 参考 source 112-115 的逻辑，动态拉取补丁
-        # 这里直接锁定 android14-6.1 或你实际的 5.15 分支
+        # 参考源码逻辑，改用 simonpunk 的仓库 
         git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs4ksu_src
         
-        # 获取 KPM 源码
+        # 获取 KPM 源码 [cite: 156]
         mkdir -p kernel/sm8550/drivers/kpm
         curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
         curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/kpm.c -o kernel/sm8550/drivers/kpm/kpm.c
 
-    - name: Surgical Integration (The "Copy & Patch" Method)
+    - name: Surgical Integration
       run: |
         cd kernel/sm8550
         
-        [cite_start]echo "--- 注入 SUSFS 关键文件  ---"
-        # 这一步是参考代码的精髓：先物理移动文件，再打补丁
+        # 1. 物理拷贝 SUSFS 文件 [cite: 116]
         cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
         cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
         
-        echo "--- 执行补丁手术 ---"
-        # 寻找对应的 .patch 文件 
+        # 2. 应用补丁 [cite: 131]
         PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
-        patch -p1 < "$PATCH_FILE" || echo "警告：补丁打入有跳过项，请检查日志"
+        patch -p1 < "$PATCH_FILE" || echo "Patch partially failed, continuing..."
 
-        [cite_start]echo "--- 注入 KPM 编译项  ---"
+        # 3. 注入 KPM [cite: 142]
         if ! grep -q "obj-y += kpm/" drivers/Makefile; then
           echo "obj-y += kpm/" >> drivers/Makefile
         fi
 
-    - name: Configure GKI Defconfig (Full Stealth Mode)
+    - name: Configure GKI Defconfig
       run: |
         cd kernel/sm8550
         GKI_CONF="arch/arm64/configs/gki_defconfig"
         
-        # 参考 source 159-161 的配置全家桶，实现最强隐藏
-        echo "正在配置全特征隐藏项..."
+        # 注入最强隐藏配置全家桶 [cite: 160, 161]
         sed -i '/CONFIG_KSU/d' "$GKI_CONF"
         {
           echo "CONFIG_KSU=y"
@@ -81,10 +77,10 @@ jobs:
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
         } >> "$GKI_CONF"
 
-    - name: Build GKI Kernel (ThinLTO Optimization)
+    - name: Build GKI Kernel
       run: |
         cd kernel/sm8550
-        # 参考 source 182-183，针对云端环境启用 ThinLTO 提速
+        # 启用 ThinLTO 优化编译速度 [cite: 182]
         sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' arch/arm64/configs/gki_defconfig
         
         make ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 gki_defconfig
@@ -93,14 +89,15 @@ jobs:
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           mv out/arch/arm64/boot/Image.gz ${GITHUB_WORKSPACE}/PixelOS-Ultimate-GKI.gz
         else
+          echo "Build failed: Image.gz not found"
           exit 1
         fi
 
     - name: Upload Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: "Ultimate-GKI-${{ github.run_id }}"
-        name: "OnePlus 12R Ultimate GKI (KSUN+SUSFS+KPM)"
+        tag_name: "GKI-v6.1-${{ github.run_id }}"
+        name: "OnePlus 12R Ultimate GKI"
         files: |
           *.gz
       env:
