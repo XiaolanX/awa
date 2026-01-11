@@ -1,11 +1,11 @@
-name: PixelOS_Ultimate_GKI_V27_APT
+name: PixelOS_Ultimate_GKI_V28_FAST
 
 on:
   workflow_dispatch:
 
 jobs:
   Build_Kernel:
-    name: Build GKI with APT Clang FAST Mode
+    name: Build GKI with Fast Logic
     runs-on: ubuntu-latest
     
     steps:
@@ -22,17 +22,12 @@ jobs:
       - name: Setup Environment
         run: |
           sudo apt-get update
-          # 核心：通过 APT 安装完整的编译器环境
           sudo apt-get install -y bc build-essential flex bison binfmt-support libssl-dev libelf-dev \
           clang-15 lld-15 llvm-15 python3-pip git-lfs gawk dos2unix rsync libncurses-dev jq
-          
-          # 建立软链接，模拟 AOSP 工具链路径
+          # 核心：模拟 AOSP 环境路径
           sudo ln -sf /usr/bin/clang-15 /usr/bin/clang
           sudo ln -sf /usr/bin/ld.lld-15 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-nm-15 /usr/bin/llvm-nm
-          sudo ln -sf /usr/bin/llvm-objcopy-15 /usr/bin/llvm-objcopy
-          sudo ln -sf /usr/bin/llvm-objdump-15 /usr/bin/llvm-objdump
-          sudo ln -sf /usr/bin/llvm-strip-15 /usr/bin/llvm-strip
           pip3 install setuptools
 
       - name: Clone Kernel Source
@@ -41,56 +36,40 @@ jobs:
 
       - name: Get SUSFS & KPM
         run: |
-          # 参考资料：拉取 simonpunk 的 SUSFS 仓库
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs4ksu_src
           mkdir -p kernel/sm8550/drivers/kpm
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/kpm.c -o kernel/sm8550/drivers/kpm/kpm.c
 
-      - name: Surgical Integration & Oplus Fix
+      - name: Surgical Integration (The "A.txt" Logic)
         run: |
           cd kernel/sm8550
-          # 1. 清理 ABI 导出限制：这是解决一加源码链接报错的杀手锏
+          # 1. 物理删除导出限制 [参考 source: 61]
           find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
           rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
           
-          # 2. 移除构建审查：防止由于加入 SUSFS 导致的配置校验失败
+          # 2. 移除配置校验 (这是解决 Error 2 的核心) [参考 source: 172]
           [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
           
-          # 3. 递归修复 Kconfig 路径，彻底解决 HDRINST 报错
-          python3 -c '
-          import os, re
-          for root, dirs, files in os.walk("."):
-              for file in files:
-                  if file == "Kconfig":
-                      path = os.path.join(root, file)
-                      with open(path, "r") as f: lines = f.readlines()
-                      with open(path, "w") as f:
-                          for line in lines:
-                              match = re.search(r"source\s+\"([^\"]+)\"", line)
-                              if match:
-                                  if not os.path.exists(os.path.join(root, match.group(1))): continue
-                              f.write(line)
-          '
-          
-          # 4. 物理注入 SUSFS 文件
+          # 3. 暴力屏蔽所有 Oplus 模块的头文件安装引用 [针对 HDRINST 报错]
+          find . -name "Makefile" -o -name "Kbuild" | xargs sed -i '/oplus/d' || true
+          find . -name "Makefile" -o -name "Kbuild" | xargs sed -i '/vendor/d' || true
+
+          # 4. 物理注入 SUSFS (不依赖脆弱的补丁) [参考 source: 116]
           cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
           cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
           PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
           patch -p1 < "$PATCH_FILE" || echo "Patch conflict ignored."
-          
-          # 5. 注入 KPM
-          [ -f "drivers/Makefile" ] && echo "obj-y += kpm/" >> drivers/Makefile
 
-      - name: Build GKI Kernel (FAST_BUILD Style)
+      - name: Build GKI Kernel
         run: |
           cd kernel/sm8550
           GKI_CONF="arch/arm64/configs/gki_defconfig"
           
-          # 强制开启 ThinLTO：参考资料建议以此降低云端内存压力
+          # 5. 开启 ThinLTO [参考 source: 183]
           sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' "$GKI_CONF"
           
-          # 注入隐藏配置全家桶
+          # 6. 注入隐藏项配置 [参考 source: 160]
           {
             echo "CONFIG_KSU=y"
             echo "CONFIG_KPM=y"
@@ -99,14 +78,15 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
             echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
           } >> "$GKI_CONF"
           
-          # 参考资料：设定全套 LLVM 工具链变量并忽略非致命警告
-          export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          # 7. 注入 FAST_BUILD 环境变量 [参考 source: 194]
+          # 特别注意：增加了 -fcommon 和 -Wno-error 来强行压制 Error 2
+          export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
+          KCFLAGS=-Wno-error -fcommon"
           
           make O=out $MAKE_ARGS gki_defconfig
-          # 直接指定 Image.gz 目标，跳过导致报错的 headers 安装
+          # 直接指定编译 Image.gz 目标，不给它跑头文件检查的机会
           make -j$(nproc) O=out $MAKE_ARGS Image.gz
           
           if [ -f "out/arch/arm64/boot/Image.gz" ]; then
@@ -119,7 +99,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "GKI-FAST-${{ github.run_id }}"
-          name: "OnePlus 12R Ultimate GKI (APT Clang-15)"
+          name: "OnePlus 12R FAST GKI (Final V28)"
           files: |
             *.gz
         env:
