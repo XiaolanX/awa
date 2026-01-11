@@ -1,4 +1,4 @@
-name: PixelOS_Ultimate_GKI_V28_FAST
+name: PixelOS_Ultimate_GKI_V29_FAST
 
 on:
   workflow_dispatch:
@@ -24,7 +24,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison binfmt-support libssl-dev libelf-dev \
           clang-15 lld-15 llvm-15 python3-pip git-lfs gawk dos2unix rsync libncurses-dev jq
-          # 核心：模拟 AOSP 环境路径
           sudo ln -sf /usr/bin/clang-15 /usr/bin/clang
           sudo ln -sf /usr/bin/ld.lld-15 /usr/bin/ld.lld
           sudo ln -sf /usr/bin/llvm-nm-15 /usr/bin/llvm-nm
@@ -41,21 +40,21 @@ jobs:
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/kpm.c -o kernel/sm8550/drivers/kpm/kpm.c
 
-      - name: Surgical Integration (The "A.txt" Logic)
+      - name: Surgical Integration (Final Polish)
         run: |
           cd kernel/sm8550
-          # 1. 物理删除导出限制 [参考 source: 61]
+          # 清理 ABI 限制
           find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
           rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
           
-          # 2. 移除配置校验 (这是解决 Error 2 的核心) [参考 source: 172]
+          # 移除配置校验
           [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
           
-          # 3. 暴力屏蔽所有 Oplus 模块的头文件安装引用 [针对 HDRINST 报错]
-          find . -name "Makefile" -o -name "Kbuild" | xargs sed -i '/oplus/d' || true
-          find . -name "Makefile" -o -name "Kbuild" | xargs sed -i '/vendor/d' || true
+          # 暴力清理 oplus 头文件安装引用，解决 HDRINST 报错
+          find . -type f \( -name "Makefile" -o -name "Kbuild" \) -exec sed -i '/oplus/d' {} +
+          find . -type f \( -name "Makefile" -o -name "Kbuild" \) -exec sed -i '/vendor/d' {} +
 
-          # 4. 物理注入 SUSFS (不依赖脆弱的补丁) [参考 source: 116]
+          # 物理注入 SUSFS
           cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
           cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
           PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
@@ -66,10 +65,10 @@ jobs:
           cd kernel/sm8550
           GKI_CONF="arch/arm64/configs/gki_defconfig"
           
-          # 5. 开启 ThinLTO [参考 source: 183]
+          # 开启 ThinLTO
           sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' "$GKI_CONF"
           
-          # 6. 注入隐藏项配置 [参考 source: 160]
+          # 注入隐藏项配置
           {
             echo "CONFIG_KSU=y"
             echo "CONFIG_KPM=y"
@@ -80,13 +79,11 @@ jobs:
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
           } >> "$GKI_CONF"
           
-          # 7. 注入 FAST_BUILD 环境变量 [参考 source: 194]
-          # 特别注意：增加了 -fcommon 和 -Wno-error 来强行压制 Error 2
-          export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- \
-          KCFLAGS=-Wno-error -fcommon"
+          # 修正后的编译参数
+          # 确保 KCFLAGS 作为一个整体传递
+          export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS='-Wno-error -fcommon'"
           
           make O=out $MAKE_ARGS gki_defconfig
-          # 直接指定编译 Image.gz 目标，不给它跑头文件检查的机会
           make -j$(nproc) O=out $MAKE_ARGS Image.gz
           
           if [ -f "out/arch/arm64/boot/Image.gz" ]; then
@@ -99,7 +96,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "GKI-FAST-${{ github.run_id }}"
-          name: "OnePlus 12R FAST GKI (Final V28)"
+          name: "OnePlus 12R FAST GKI (V29 Fixed)"
           files: |
             *.gz
         env:
