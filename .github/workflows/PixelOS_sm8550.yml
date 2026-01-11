@@ -27,29 +27,11 @@ jobs:
         REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
         echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
 
-    - name: Build Kernel with ksu
-      run: |
-        cd kernel/oneplus/sm8550
-        build_sm8550 --clean --ksu
-        mv kernel.zip ${GITHUB_WORKSPACE}/ksu.zip
-        git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
-        cd -
-
-    - name: Build Kernel with ksu-next
-      run: |
-        cd kernel/oneplus/sm8550
-        build_sm8550 --clean --ksu-next
-        mv kernel.zip ${GITHUB_WORKSPACE}/ksu-next.zip
-        git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
-        cd -
-
     - name: Build Kernel with sukisu
       run: |
-        cd kernel/oneplus/sm8550
-        build_sm8550 --clean --sukisu
-        mv kernel.zip ${GITHUB_WORKSPACE}/sukisu.zip
-        git clean -fdx && find . -mindepth 1 -maxdepth 1 -type d -exec test -d "{}/.git" \; -print | xargs rm -rf && git reset --hard
-        cd -
+        cd kernel_workspace/kernel_platform
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$BRANCH_NAME"
+        sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
 
     - name: Create GitHub Release
       run: |
