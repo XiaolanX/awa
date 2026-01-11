@@ -101,28 +101,71 @@ jobs:
           [ -f "drivers/Makefile" ] && echo "obj-y += kpm/" >> drivers/Makefile
         fi
 
-    - name: Configure and Build GKI Kernel
+    - name: Build GKI 2.0 Kernel
       run: |
         cd kernel_workspace/kernel
-        GKI_CONF="arch/arm64/configs/gki_defconfig"
+        echo "开始构建GKI 2.0内核..."
         
-        # 开启 ThinLTO 并配置隐藏项
-        sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' "$GKI_CONF"
-        {
-          echo "CONFIG_KSU=y"
-          [ "${{ inputs.enable_kpm }}" = "true" ] && echo "CONFIG_KPM=y"
-          if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-            echo "CONFIG_KSU_SUSFS=y"
-            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-          fi
-        } >> "$GKI_CONF"
+        # 显示详细环境
+        echo "构建环境:"
+        echo "ARCH: ${{ env.ARCH }}"
+        echo "CROSS_COMPILE: ${{ env.CROSS_COMPILE }}"
+        echo "CC: $(which ${{ env.CC }})"
+        echo "LD: $(which ${{ env.LD }})"
+        echo "AR: $(which ${{ env.AR }})"
+        echo "GKI版本: ${{ env.GKI_VERSION }}"
         
-        # 开始编译 (参考 source: 194)
-        make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" gki_defconfig
-        make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" -j$(nproc) Image.gz
+        # 获取CPU核心数
+        CORE_COUNT=$(nproc)
+        echo "使用 $CORE_COUNT 个核心进行编译"
+        
+        # 构建内核Image - 只构建Image，不安装头文件
+        echo "编译内核Image..."
+        make ARCH=${{ env.ARCH }} \
+             CC=${{ env.CC }} \
+             LD=${{ env.LD }} \
+             AR=${{ env.AR }} \
+             STRIP=${{ env.STRIP }} \
+             LLVM=1 \
+             LLVM_IAS=1 \
+             -j$CORE_COUNT \
+             Image.gz-dtb \
+             modules_prepare  # 只准备模块，不安装
+        
+        # 检查构建结果
+        echo "检查构建输出..."
+        if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
+            IMAGE_SIZE=$(stat -c%s "arch/arm64/boot/Image.gz-dtb")
+            echo "✅ GKI 2.0内核构建成功"
+            echo "  文件: arch/arm64/boot/Image.gz-dtb"
+            echo "  大小: $IMAGE_SIZE 字节"
+            echo "  文件类型:"
+            file arch/arm64/boot/Image.gz-dtb
+            
+            # 检查是否有未压缩的Image
+            if [ -f "arch/arm64/boot/Image" ]; then
+                echo "  同时生成: arch/arm64/boot/Image"
+            fi
+        else
+            echo "❌ 未找到内核镜像"
+            echo "尝试编译标准Image..."
+            make ARCH=${{ env.ARCH }} \
+                 CC=${{ env.CC }} \
+                 LD=${{ env.LD }} \
+                 LLVM=1 \
+                 LLVM_IAS=1 \
+                 -j$CORE_COUNT \
+                 Image \
+                 modules_prepare
+                 
+            if [ -f "arch/arm64/boot/Image" ]; then
+                IMAGE_SIZE=$(stat -c%s "arch/arm64/boot/Image")
+                echo "✅ 标准Image编译成功: $IMAGE_SIZE 字节"
+            else
+                echo "❌ 编译失败"
+                exit 1
+            fi
+        fi
 
     - name: Create Kernel Package
       run: |
