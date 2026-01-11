@@ -1,4 +1,4 @@
-name: PixelOS_Ultimate_GKI_V29_FAST
+name: PixelOS_Ultimate_GKI_V30_FAST
 
 on:
   workflow_dispatch:
@@ -40,17 +40,17 @@ jobs:
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/kpm.c -o kernel/sm8550/drivers/kpm/kpm.c
 
-      - name: Surgical Integration (Final Polish)
+      - name: Surgical Integration
         run: |
           cd kernel/sm8550
-          # 清理 ABI 限制
+          # 参考清理 ABI 限制
           find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
           rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
           
-          # 移除配置校验
+          # 移除构建审查
           [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
           
-          # 暴力清理 oplus 头文件安装引用，解决 HDRINST 报错
+          # 彻底清除 Makefile 里的 oplus 引用 [针对 HDRINST 报错]
           find . -type f \( -name "Makefile" -o -name "Kbuild" \) -exec sed -i '/oplus/d' {} +
           find . -type f \( -name "Makefile" -o -name "Kbuild" \) -exec sed -i '/vendor/d' {} +
 
@@ -79,12 +79,9 @@ jobs:
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
           } >> "$GKI_CONF"
           
-          # 修正后的编译参数
-          # 确保 KCFLAGS 作为一个整体传递
-          export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS='-Wno-error -fcommon'"
-          
-          make O=out $MAKE_ARGS gki_defconfig
-          make -j$(nproc) O=out $MAKE_ARGS Image.gz
+          # 不再使用外部变量，直接在命令里写死参数，杜绝引号解析错误
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" gki_defconfig
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" -j$(nproc) Image.gz
           
           if [ -f "out/arch/arm64/boot/Image.gz" ]; then
             mv out/arch/arm64/boot/Image.gz ${GITHUB_WORKSPACE}/PixelOS-Ultimate-GKI.gz
@@ -96,7 +93,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "GKI-FAST-${{ github.run_id }}"
-          name: "OnePlus 12R FAST GKI (V29 Fixed)"
+          name: "OnePlus 12R FAST GKI (V30 Final)"
           files: |
             *.gz
         env:
