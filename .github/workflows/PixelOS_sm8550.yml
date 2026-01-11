@@ -29,7 +29,7 @@ jobs:
         # 克隆主内核 (假设为 5.15 分支)
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/sm8550
         # 克隆 SUSFS 补丁
-        git clone https://gitlab.com/khiz_zy/susfs_patches.git --depth=1 susfs_src
+        git clone https://gitlab.com/simonpunk/susfs4ksu --depth=1 susfs_src
 
     - name: Patching SUSFS & KPM
       run: |
