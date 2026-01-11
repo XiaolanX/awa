@@ -36,6 +36,7 @@ jobs:
         sudo ln -sf /usr/bin/clang-15 /usr/bin/clang
         sudo ln -sf /usr/bin/ld.lld-15 /usr/bin/ld.lld
         sudo ln -sf /usr/bin/llvm-nm-15 /usr/bin/llvm-nm
+        pip3 install setuptools
 
     - name: Clone Kernel Source
       run: |
@@ -45,9 +46,7 @@ jobs:
     - name: Get SUSFS & KPM
       if: inputs.enable_susfs || inputs.enable_kpm
       run: |
-        # 克隆 SUSFS 源码
         git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs_src
-        # 准备 KPM 驱动
         mkdir -p kernel_workspace/kernel/drivers/kpm
         curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel_workspace/kernel/drivers/kpm/Kbuild
         curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/kpm.c -o kernel_workspace/kernel/drivers/kpm/kpm.c
@@ -55,15 +54,12 @@ jobs:
     - name: Surgical Integration (Oplus Fixes)
       run: |
         cd kernel_workspace/kernel
-        
-        # 1. 清理 ABI 导出限制 (参考 source: 61)
+        # 1. 清理 ABI 导出限制
         find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
         rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
-        
-        # 2. 移除构建审查 (参考 source: 172)
+        # 2. 移除构建审查
         [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
-        
-        # 3. 终极 Kconfig 净化 (针对 HDRINST 报错)
+        # 3. 终极 Kconfig 路径净化 (防止 HDRINST 报错)
         python3 -c '
         import os, re
         def clean_kconfig(file_path):
@@ -83,94 +79,57 @@ jobs:
                 if file in ["Kconfig", "Kbuild", "Makefile"]:
                     clean_kconfig(os.path.join(root, file))
         '
-
         # 4. 屏蔽 Makefile 里的 vendor/oplus 安装
         find . -type f \( -name "Makefile" -o -name "Kbuild" \) -exec sed -i '/oplus/d' {} +
         find . -type f \( -name "Makefile" -o -name "Kbuild" \) -exec sed -i '/vendor/d' {} +
-
-        # 5. 注入 SUSFS (参考 source: 116)
+        # 5. 注入 SUSFS
         if [ "${{ inputs.enable_susfs }}" = "true" ]; then
           cp ../../susfs_src/kernel_patches/fs/* ./fs/
           cp ../../susfs_src/kernel_patches/include/linux/* ./include/linux/
           PATCH_FILE=$(find ../../susfs_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
           patch -p1 < "$PATCH_FILE" || echo "Patch conflict ignored."
         fi
-
         # 6. 注入 KPM
         if [ "${{ inputs.enable_kpm }}" = "true" ]; then
           [ -f "drivers/Makefile" ] && echo "obj-y += kpm/" >> drivers/Makefile
         fi
 
-    - name: Build GKI 2.0 Kernel
+    - name: Configure and Build GKI Kernel
       run: |
         cd kernel_workspace/kernel
-        echo "开始构建GKI 2.0内核..."
+        # 强制设置环境变量，防止 make 识别为空
+        export ARCH=arm64
+        export LLVM=1
+        export LLVM_IAS=1
         
-        # 显示详细环境
-        echo "构建环境:"
-        echo "ARCH: ${{ env.ARCH }}"
-        echo "CROSS_COMPILE: ${{ env.CROSS_COMPILE }}"
-        echo "CC: $(which ${{ env.CC }})"
-        echo "LD: $(which ${{ env.LD }})"
-        echo "AR: $(which ${{ env.AR }})"
-        echo "GKI版本: ${{ env.GKI_VERSION }}"
+        GKI_CONF="arch/arm64/configs/gki_defconfig"
+        sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' "$GKI_CONF"
+        {
+          echo "CONFIG_KSU=y"
+          [ "${{ inputs.enable_kpm }}" = "true" ] && echo "CONFIG_KPM=y"
+          if [ "${{ inputs.enable_susfs }}" = "true" ]; then
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+          fi
+        } >> "$GKI_CONF"
         
-        # 获取CPU核心数
-        CORE_COUNT=$(nproc)
-        echo "使用 $CORE_COUNT 个核心进行编译"
-        
-        # 构建内核Image - 只构建Image，不安装头文件
-        echo "编译内核Image..."
-        make ARCH=${{ env.ARCH }} \
-             CC=${{ env.CC }} \
-             LD=${{ env.LD }} \
-             AR=${{ env.AR }} \
-             STRIP=${{ env.STRIP }} \
-             LLVM=1 \
-             LLVM_IAS=1 \
-             -j$CORE_COUNT \
-             Image.gz-dtb \
-             modules_prepare  # 只准备模块，不安装
-        
-        # 检查构建结果
-        echo "检查构建输出..."
-        if [ -f "arch/arm64/boot/Image.gz-dtb" ]; then
-            IMAGE_SIZE=$(stat -c%s "arch/arm64/boot/Image.gz-dtb")
-            echo "✅ GKI 2.0内核构建成功"
-            echo "  文件: arch/arm64/boot/Image.gz-dtb"
-            echo "  大小: $IMAGE_SIZE 字节"
-            echo "  文件类型:"
-            file arch/arm64/boot/Image.gz-dtb
-            
-            # 检查是否有未压缩的Image
-            if [ -f "arch/arm64/boot/Image" ]; then
-                echo "  同时生成: arch/arm64/boot/Image"
-            fi
-        else
-            echo "❌ 未找到内核镜像"
-            echo "尝试编译标准Image..."
-            make ARCH=${{ env.ARCH }} \
-                 CC=${{ env.CC }} \
-                 LD=${{ env.LD }} \
-                 LLVM=1 \
-                 LLVM_IAS=1 \
-                 -j$CORE_COUNT \
-                 Image \
-                 modules_prepare
-                 
-            if [ -f "arch/arm64/boot/Image" ]; then
-                IMAGE_SIZE=$(stat -c%s "arch/arm64/boot/Image")
-                echo "✅ 标准Image编译成功: $IMAGE_SIZE 字节"
-            else
-                echo "❌ 编译失败"
-                exit 1
-            fi
-        fi
+        # 统一不使用 O=out，直接在源码目录编译以简化路径逻辑
+        make ARCH=$ARCH LLVM=$LLVM LLVM_IAS=$LLVM_IAS CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" gki_defconfig
+        make ARCH=$ARCH LLVM=$LLVM LLVM_IAS=$LLVM_IAS CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" -j$(nproc) Image.gz
 
     - name: Create Kernel Package
       run: |
         mkdir -p gki_package
-        cp kernel_workspace/kernel/out/arch/arm64/boot/Image.gz gki_package/
+        # 路径改回源码根目录
+        if [ -f "kernel_workspace/kernel/arch/arm64/boot/Image.gz" ]; then
+          cp kernel_workspace/kernel/arch/arm64/boot/Image.gz gki_package/
+        else
+          cp kernel_workspace/kernel/arch/arm64/boot/Image gki_package/Image
+          gzip -n gki_package/Image
+        fi
         cp kernel_workspace/kernel/.config gki_package/kernel.config
         echo "Build Date: $(date)" > gki_package/version.txt
 
@@ -185,7 +144,7 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        DATE_TAG=$(date +%Y%m%d)
+        DATE_TAG=$(date +%Y%m%d-%H%M)
         ZIP_NAME="PixelOS-SM8550-GKI-${DATE_TAG}.zip"
         cd gki_package && zip -r ../$ZIP_NAME . && cd ..
         gh release create "gki-$DATE_TAG" --title "PixelOS GKI Kernel $DATE_TAG" --notes "OnePlus 12R (SM8550) SUSFS+KPM Build" "$ZIP_NAME"
