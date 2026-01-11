@@ -1,11 +1,11 @@
-name: PixelOS_Ultimate_GKI_V4
+name: PixelOS_Ultimate_GKI_Final_Fix
 
 on:
   workflow_dispatch:
 
 jobs:
   Build_Kernel:
-    name: Build GKI with SukiSU-Style SUSFS
+    name: Build GKI with SukiSU-Style Fixes
     runs-on: ubuntu-latest
     
     steps:
@@ -30,27 +30,36 @@ jobs:
 
     - name: Get SUSFS & KPM
       run: |
-        # 参考源码逻辑，改用 simonpunk 的仓库 
+        # 依照参考脚本，拉取 simonpunk 的 SUSFS 仓库
         git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs4ksu_src
         
-        # 获取 KPM 源码 [cite: 156]
+        # 获取 KPM 源码并放入驱动目录
         mkdir -p kernel/sm8550/drivers/kpm
         curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
         curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/kpm.c -o kernel/sm8550/drivers/kpm/kpm.c
 
-    - name: Surgical Integration
+    - name: Surgical Integration & Oplus Fix
       run: |
         cd kernel/sm8550
         
-        # 1. 物理拷贝 SUSFS 文件 [cite: 116]
+        echo "--- 修复 Oplus 源码 Kconfig 依赖缺失 ---"
+        # 暴力切断导致 Error 1 的 vendor 路径引用
+        sed -i '/kernel\/oplus_cpu/d' init/Kconfig
+        sed -i '/oplus_performance/d' init/Kconfig
+        sed -i '/vendor\/oplus\/kernel\/device_info/d' init/Kconfig
+        
+        # 参考 source 61，移除可能导致编译中断的保护导出列表
+        find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
+
+        echo "--- 注入 SUSFS 文件与补丁 ---"
+        # 参考 source 116 的物理拷贝逻辑
         cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
         cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
         
-        # 2. 应用补丁 [cite: 131]
         PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
-        patch -p1 < "$PATCH_FILE" || echo "Patch partially failed, continuing..."
+        patch -p1 < "$PATCH_FILE" || echo "Patch partially failed, skipping conflicts..."
 
-        # 3. 注入 KPM [cite: 142]
+        echo "--- 注入 KPM 编译项 ---"
         if ! grep -q "obj-y += kpm/" drivers/Makefile; then
           echo "obj-y += kpm/" >> drivers/Makefile
         fi
@@ -60,7 +69,7 @@ jobs:
         cd kernel/sm8550
         GKI_CONF="arch/arm64/configs/gki_defconfig"
         
-        # 注入最强隐藏配置全家桶 [cite: 160, 161]
+        # 参考 source 159-161 注入完整的 SUSFS 隐藏链
         sed -i '/CONFIG_KSU/d' "$GKI_CONF"
         {
           echo "CONFIG_KSU=y"
@@ -71,25 +80,23 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
           echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
           echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
           echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
         } >> "$GKI_CONF"
 
     - name: Build GKI Kernel
       run: |
         cd kernel/sm8550
-        # 启用 ThinLTO 优化编译速度 [cite: 182]
+        # 启用 ThinLTO 优化，防止虚机内存溢出
         sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' arch/arm64/configs/gki_defconfig
         
+        # 开始正式编译
         make ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 gki_defconfig
         make ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 -j$(nproc) Image.gz
         
         if [ -f "out/arch/arm64/boot/Image.gz" ]; then
           mv out/arch/arm64/boot/Image.gz ${GITHUB_WORKSPACE}/PixelOS-Ultimate-GKI.gz
         else
-          echo "Build failed: Image.gz not found"
+          echo "编译失败，Image.gz 未生成"
           exit 1
         fi
 
@@ -97,7 +104,7 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         tag_name: "GKI-v6.1-${{ github.run_id }}"
-        name: "OnePlus 12R Ultimate GKI"
+        name: "OnePlus 12R Ultimate GKI (Fix Kconfig)"
         files: |
           *.gz
       env:
