@@ -1,11 +1,11 @@
-name: PixelOS_Ultimate_GKI_V9
+name: PixelOS_Ultimate_GKI_V12_Clang
 
 on:
   workflow_dispatch:
 
 jobs:
   Build_Kernel:
-    name: Build GKI with SukiSU-Style Fixes
+    name: Build GKI with Official Clang
     runs-on: ubuntu-latest
     
     steps:
@@ -22,8 +22,16 @@ jobs:
       - name: Setup Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential flex bison binfmt-support libssl-dev libelf-dev clang llvm lld python3-pip git-lfs gawk dos2unix
+          sudo apt-get install -y bc build-essential flex bison binfmt-support libssl-dev libelf-dev clang llvm lld python3-pip git-lfs gawk dos2unix rsync libncurses-dev
           pip3 install setuptools
+
+      - name: Download Official AOSP Clang
+        run: |
+          # 下载目前 GKI 编译最稳的高版本 Clang (r522817)
+          mkdir -p $GITHUB_WORKSPACE/clang-aosp
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz
+          tar -xzf clang-r522817.tar.gz -C $GITHUB_WORKSPACE/clang-aosp
+          echo "CLANG_PATH=$GITHUB_WORKSPACE/clang-aosp/bin" >> $GITHUB_ENV
 
       - name: Clone Kernel Source
         run: |
@@ -31,6 +39,7 @@ jobs:
 
       - name: Get SUSFS & KPM
         run: |
+          # 参考资料：拉取 simonpunk 的补丁仓库 [cite: 113]
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs4ksu_src
           mkdir -p kernel/sm8550/drivers/kpm
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
@@ -40,8 +49,7 @@ jobs:
         run: |
           cd kernel/sm8550
           
-          echo "--- 正在全量清理无效的 Kconfig 引用 ---"
-          # 使用纯净 Python 脚本，自动删除所有指向不存在路径的 source 行
+          echo "--- 1. 全量修复 Kconfig 路径 (防止 HDRINST 报错) ---"
           python3 -c '
           import os, re
           for root, dirs, files in os.walk("."):
@@ -55,55 +63,62 @@ jobs:
                               match = re.search(r"source\s+\"([^\"]+)\"", line)
                               if match:
                                   target = match.group(1)
-                                  # 检查物理路径是否存在
-                                  real_path = os.path.join(root, target)
-                                  if not os.path.exists(real_path):
-                                      continue
+                                  if not os.path.exists(os.path.join(root, target)): continue
                               f.write(line)
           '
           
-          echo "--- 清理 ABI 导出限制 ---"
+          [cite_start]echo "--- 2. 参考资料：清理 ABI 保护限制  ---"
           find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
           rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
-          [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
 
-          echo "--- 注入 SUSFS ---"
+          [cite_start]echo "--- 3. 参考资料：物理拷贝 SUSFS 文件  ---"
           cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
           cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
           PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
           patch -p1 < "$PATCH_FILE" || echo "Patch conflict ignored."
 
-          echo "--- 注入 KPM 编译项 ---"
-          if ! grep -q "obj-y += kpm/" drivers/Makefile; then
-            echo "obj-y += kpm/" >> drivers/Makefile
-          fi
+          echo "--- 4. 注入 KPM 编译项 ---"
+          echo "obj-y += kpm/" >> drivers/Makefile
 
       - name: Configure GKI Defconfig
         run: |
           cd kernel/sm8550
           GKI_CONF="arch/arm64/configs/gki_defconfig"
+          
+          # 参考资料：注入完整隐藏链配置 [cite: 160, 161]
           sed -i '/CONFIG_KSU/d' "$GKI_CONF"
           {
             echo "CONFIG_KSU=y"
             echo "CONFIG_KPM=y"
             echo "CONFIG_KSU_SUSFS=y"
             echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-            echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
             echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
           } >> "$GKI_CONF"
 
-      - name: Build GKI Kernel
+      - name: Build GKI Kernel (Official Clang Mode)
         run: |
           cd kernel/sm8550
+          # 强制使用官方下载的工具链路径
+          export PATH="${{ env.CLANG_PATH }}:$PATH"
+          
+          # 设定快速构建参数 [cite: 193, 194]
+          # 加入 KCFLAGS 忽略非致命警告
+          export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+                           CROSS_COMPILE=aarch64-linux-gnu- \
+                           LD=ld.lld NM=llvm-nm OBJCOPY=llvm-objcopy \
+                           OBJDUMP=llvm-objdump STRIP=llvm-strip \
+                           KCFLAGS=-Wno-error"
+          
+          # 参考资料：启用 ThinLTO 优化 
           sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' arch/arm64/configs/gki_defconfig
-          make ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 gki_defconfig
-          make ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 -j$(nproc) Image.gz
+          
+          make O=out $MAKE_ARGS gki_defconfig
+          make -j$(nproc) O=out $MAKE_ARGS Image.gz
+          
           if [ -f "out/arch/arm64/boot/Image.gz" ]; then
             mv out/arch/arm64/boot/Image.gz ${GITHUB_WORKSPACE}/PixelOS-Ultimate-GKI.gz
           else
@@ -113,8 +128,8 @@ jobs:
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "GKI-Ultimate-${{ github.run_id }}"
-          name: "OnePlus 12R Ultimate GKI (Final V9)"
+          tag_name: "GKI-Clang-${{ github.run_id }}"
+          name: "OnePlus 12R Ultimate GKI (Official Clang)"
           files: |
             *.gz
         env:
