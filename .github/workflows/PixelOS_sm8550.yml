@@ -1,4 +1,4 @@
-name: PixelOS_Ultimate_GKI_V7
+name: PixelOS_Ultimate_GKI_V8
 
 on:
   workflow_dispatch:
@@ -31,6 +31,7 @@ jobs:
 
       - name: Get SUSFS & KPM
         run: |
+          # 参考参考代码，拉取补丁仓库 [cite: 112, 113]
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs4ksu_src
           mkdir -p kernel/sm8550/drivers/kpm
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
@@ -39,17 +40,35 @@ jobs:
       - name: Surgical Integration & Oplus Fix
         run: |
           cd kernel/sm8550
-          echo "--- 清理 ABI 导出列表 ---"
+          
+          echo "--- 深度清理失效的 Kconfig 引用 (含 kernelFwUpdate) ---"
+          # 终极逻辑：检查所有 Kconfig 引用的文件是否存在，不存在则删除该行 
+          find . -name "Kconfig" -type f | xargs -I {} python3 -c '
+          import os, sys, re
+          f_path = "{}"
+          with open(f_path, "r") as f:
+              lines = f.readlines()
+          with open(f_path, "w") as f:
+              for line in lines:
+                  match = re.search(r"source\s+\"([^\"]+)\"", line)
+                  if match:
+                      target = match.group(1)
+                      # 修正路径判断逻辑，处理相对路径
+                      real_target = os.path.join(os.path.dirname(f_path), target) if not target.startswith("/") else target
+                      if not os.path.exists(real_target) and "oplus" in line.lower() or "kernel" in line.lower():
+                          print(f"Removing invalid source: {target} in {f_path}")
+                          continue
+                  f.write(line)
+          ' || true
+
+          echo "--- 清理 ABI 导出列表与构建审查 ---"
+          # 参考参考代码清理 ABI 保护限制 [cite: 61]
           find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
           rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
-
-          echo "--- 移除配置审查 ---"
           [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
 
-          echo "--- 全量清理 Kconfig 中的 Oplus 失效引用 ---"
-          grep -r "source" . -l | xargs sed -i '/oplus/d' || true
-
           echo "--- 注入 SUSFS ---"
+          # 物理拷贝 SUSFS 核心文件 [cite: 116]
           cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
           cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
           PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
@@ -78,11 +97,12 @@ jobs:
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
             echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
-          } >> "$GKI_CONF"
+          } >> "$GKI_CONF" [cite: 160, 161]
 
       - name: Build GKI Kernel
         run: |
           cd kernel/sm8550
+          # 启用 ThinLTO 优化 
           sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' arch/arm64/configs/gki_defconfig
           make ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 gki_defconfig
           make ARCH=arm64 O=out LLVM=1 LLVM_IAS=1 -j$(nproc) Image.gz
@@ -96,7 +116,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "GKI-Ultimate-${{ github.run_id }}"
-          name: "OnePlus 12R Ultimate GKI (Pure V7)"
+          name: "OnePlus 12R Ultimate GKI (Fix V8)"
           files: |
             *.gz
         env:
