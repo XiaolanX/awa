@@ -1,11 +1,11 @@
-name: PixelOS_Ultimate_GKI_V20_Final
+name: PixelOS_Ultimate_GKI_V22_APT
 
 on:
   workflow_dispatch:
 
 jobs:
   Build_Kernel:
-    name: Build GKI with SukiSU-FAST Mode
+    name: Build GKI with APT Clang
     runs-on: ubuntu-latest
     
     steps:
@@ -22,7 +22,13 @@ jobs:
       - name: Setup Environment
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential flex bison binfmt-support libssl-dev libelf-dev clang llvm lld python3-pip git-lfs gawk dos2unix rsync libncurses-dev jq
+          # 显式安装高版本 Clang 和工具链
+          sudo apt-get install -y bc build-essential flex bison binfmt-support libssl-dev libelf-dev \
+          clang-15 lld-15 llvm-15 python3-pip git-lfs gawk dos2unix rsync libncurses-dev jq
+          # 创建软链接确保编译器命令可用
+          sudo ln -sf /usr/bin/clang-15 /usr/bin/clang
+          sudo ln -sf /usr/bin/ld.lld-15 /usr/bin/ld.lld
+          sudo ln -sf /usr/bin/llvm-nm-15 /usr/bin/llvm-nm
           pip3 install setuptools
 
       - name: Clone Kernel Source
@@ -31,6 +37,7 @@ jobs:
 
       - name: Get SUSFS & KPM
         run: |
+          # 参考资料拉取补丁
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs4ksu_src
           mkdir -p kernel/sm8550/drivers/kpm
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
@@ -39,12 +46,12 @@ jobs:
       - name: Surgical Integration & Oplus Fix
         run: |
           cd kernel/sm8550
-          # 清理 ABI 导出限制 (参考 source 61)
+          # 1. 清理 ABI 导出限制 (参考资料)
           find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
           rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
-          # 移除构建审查 (参考 source 172)
+          # 2. 移除构建审查 (参考资料)
           [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
-          # 全量修复 Kconfig 路径
+          # 3. 递归修复 Kconfig 路径，防止由于组件缺失导致的编译中断
           python3 -c '
           import os, re
           for root, dirs, files in os.walk("."):
@@ -59,30 +66,21 @@ jobs:
                                   if not os.path.exists(os.path.join(root, match.group(1))): continue
                               f.write(line)
           '
-          # 注入 SUSFS (参考 source 116)
+          # 4. 物理注入 SUSFS (参考资料)
           cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
           cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
           PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
           patch -p1 < "$PATCH_FILE" || echo "Patch conflict ignored."
-          # 注入 KPM
+          # 5. 注入 KPM
           [ -f "drivers/Makefile" ] && echo "obj-y += kpm/" >> drivers/Makefile
 
-      - name: Download AOSP Clang
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/clang-aosp
-          # 采用 Android U 官方最新稳定版分支 (r487747c)
-          wget -O clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz?format=TGZ"
-          tar -xzf clang.tar.gz -C $GITHUB_WORKSPACE/clang-aosp
-          echo "CLANG_BIN=$GITHUB_WORKSPACE/clang-aosp/bin" >> $GITHUB_ENV
-
-      - name: Build GKI Kernel (FAST_BUILD Mode)
+      - name: Build GKI Kernel
         run: |
           cd kernel/sm8550
-          export PATH="${{ env.CLANG_BIN }}:$PATH"
           GKI_CONF="arch/arm64/configs/gki_defconfig"
-          # 配置 ThinLTO (参考 source 183)
+          # 强制开启 ThinLTO 以优化 GitHub Actions 内存占用 (参考资料)
           sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' "$GKI_CONF"
-          # 配置 SUSFS 全家桶 (参考 source 160)
+          # 注入隐藏配置
           {
             echo "CONFIG_KSU=y"
             echo "CONFIG_KPM=y"
@@ -91,9 +89,8 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
             echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
           } >> "$GKI_CONF"
-          # 编译参数设置 (参考 source 194)
+          # 核心：使用全套 LLVM 工具链并忽略警告错误 (参考资料)
           export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
           make O=out $MAKE_ARGS gki_defconfig
           make -j$(nproc) O=out $MAKE_ARGS Image.gz
@@ -106,8 +103,8 @@ jobs:
       - name: Upload Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "GKI-FAST-${{ github.run_id }}"
-          name: "OnePlus 12R Ultimate GKI (Final V20)"
+          tag_name: "GKI-APT-${{ github.run_id }}"
+          name: "OnePlus 12R Ultimate GKI (APT Clang 15)"
           files: |
             *.gz
         env:
