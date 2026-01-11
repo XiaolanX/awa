@@ -1,4 +1,4 @@
-name: PixelOS_Ultimate_GKI_V18_FAST
+name: PixelOS_Ultimate_GKI_V19_FAST
 
 on:
   workflow_dispatch:
@@ -27,12 +27,11 @@ jobs:
 
       - name: Clone Kernel Source
         run: |
-          # 克隆一加 12R 源码
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/sm8550
 
       - name: Get SUSFS & KPM
         run: |
-          # 参考参考代码 source: 113, 116
+          # 参考资料 [cite: 113, 116]
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs4ksu_src
           mkdir -p kernel/sm8550/drivers/kpm
           curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/sm8550/drivers/kpm/Kbuild
@@ -43,12 +42,12 @@ jobs:
           cd kernel/sm8550
           
           echo "--- 1. 参考清理 ABI 导出限制 ---"
-          # 参考 source: 61，物理删除受保护的导出列表限制
+          # 参考资料 
           find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
           rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
 
           echo "--- 2. 参考移除构建配置审查 ---"
-          # 参考 source: 172，移除 check_defconfig 防止中断
+          # 参考资料 [cite: 172]
           [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
 
           echo "--- 3. 深度清理失效的 Kconfig 引用 ---"
@@ -66,7 +65,7 @@ jobs:
           ' || true
 
           echo "--- 4. 参考物理注入 SUSFS 文件 ---"
-          # 参考 source: 116，拷贝 fs 和 include 目录
+          # 参考资料 [cite: 116]
           cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
           cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
           PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
@@ -77,31 +76,29 @@ jobs:
             echo "obj-y += kpm/" >> drivers/Makefile
           fi
 
-      - name: Auto-Detect Clang and Tools
-        id: clang_detect
+      - name: Auto-Detect and Download Clang
         run: |
           cd kernel/sm8550
-          # 参考 source: 187-192 的逻辑解析 Clang 版本
+          # 参考资料 [cite: 189, 191, 192] 动态识别版本
           CLANG_VERSION=$(grep '^CLANG_VERSION=' ./build.config.constants | cut -d'=' -f2 || echo "r487703")
-          echo "检测到目标 Clang 版本: $CLANG_VERSION"
+          echo "目标 Clang 版本: $CLANG_VERSION"
           
-          # 下载官方 AOSP Clang
-          mkdir -p $GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang-aosp
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/$CLANG_VERSION.tar.gz
-          tar -xzf $CLANG_VERSION.tar.gz -C $GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang-aosp
-          
-          # 设置环境变量
-          echo "CLANG_BIN=$GITHUB_WORKSPACE/prebuilts/clang/host/linux-x86/clang-aosp/bin" >> $GITHUB_ENV
+          # 修正后的下载逻辑：必须带 ?format=TGZ 否则报 400 错误
+          mkdir -p $GITHUB_WORKSPACE/clang-aosp
+          wget -O clang.tar.gz "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VERSION}.tar.gz?format=TGZ"
+          tar -xzf clang.tar.gz -C $GITHUB_WORKSPACE/clang-aosp
+          echo "CLANG_BIN=$GITHUB_WORKSPACE/clang-aosp/bin" >> $GITHUB_ENV
 
-      - name: Build GKI Kernel (FAST_BUILD)
+      - name: Build GKI Kernel (FAST_BUILD Mode)
         run: |
           cd kernel/sm8550
+          # 参考资料 [cite: 193] 设置 PATH
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           
           GKI_CONF="arch/arm64/configs/gki_defconfig"
           
-          # 注入参考配置 source: 160, 183
-          echo "--- 配置 ThinLTO 与 SUSFS 全家桶 ---"
+          # 参考资料 [cite: 160, 183] 配置优化
+          echo "--- 配置 ThinLTO 与 SUSFS ---"
           sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' "$GKI_CONF"
           {
             echo "CONFIG_KSU=y"
@@ -111,9 +108,10 @@ jobs:
             echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
             echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
             echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
           } >> "$GKI_CONF"
           
-          # 参考 source: 193-194 设定编译参数
+          # 参考资料 [cite: 194] 编译参数
           export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 \
                            CROSS_COMPILE=aarch64-linux-gnu- \
                            LD=ld.lld NM=llvm-nm OBJCOPY=llvm-objcopy \
@@ -133,7 +131,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "GKI-FAST-${{ github.run_id }}"
-          name: "OnePlus 12R FAST GKI (Final V18)"
+          name: "OnePlus 12R FAST GKI (Final Fix)"
           files: |
             *.gz
         env:
