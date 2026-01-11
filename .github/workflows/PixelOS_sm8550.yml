@@ -1,28 +1,115 @@
-- name: Free Disk Space
-      run: |
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /usr/local/lib/android
-        sudo rm -rf /opt/ghc
-        sudo rm -rf "/usr/local/share/boost"
-        sudo rm -rf /usr/lib/jvm
-        df -h
+name: PixelOS_Kernel_CI-aston
 
-    - name: Install Build Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev ccache pahole python3 zip git
-        
-        # 修复：不再克隆整个仓库，只克隆 clang-r487747c 这个特定的提交或只克隆 bin 目录
-        # 这里我们直接从安卓镜像下载一个预编译好的独立 Clang 包
-        mkdir -p $GITHUB_WORKSPACE/clang
-        cd $GITHUB_WORKSPACE/clang
-        # 下载一个适配 5.15 内核的较小 Clang 版本
-        wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz
-        tar -xzf clang-r487747c.tar.gz
-        rm -rf clang-r487747c.tar.gz
+on:
+  workflow_dispatch:
+    inputs:
+      KSU_BRANCH:
+        description: 'SukiSU 分支 (如 main)'
+        required: true
+        default: 'main'
 
-    - name: Clone Kernel and Dependencies
-      run: |
-        # 保持 --depth=1 以节省空间
-        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
-        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
+jobs:
+  PixelOS_Kernel_CI:
+    name: PixelOS Kernel CI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf /usr/lib/jvm
+          df -h
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev ccache pahole python3 zip git wget
+          
+          # 下载适配 5.15 内核的 Clang (r487747c)
+          mkdir -p $GITHUB_WORKSPACE/clang
+          cd $GITHUB_WORKSPACE/clang
+          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz
+          tar -xzf clang-r487747c.tar.gz
+          rm -f clang-r487747c.tar.gz
+
+      - name: Clone Kernel and Dependencies
+        run: |
+          git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
+          git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
+    
+      - name: Setup Release Name
+        run: |
+          cd kernel/oneplus/sm8550
+          SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
+          REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
+          echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
+
+      - name: Build Kernel with SukiSU
+        run: |
+          cd kernel/oneplus/sm8550
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.KSU_BRANCH }}"
+          
+          if [ -d "./KernelSU" ]; then
+            cd ./KernelSU
+            sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
+          else
+            echo "SukiSU 安装失败"
+            exit 1
+          fi
+
+      - name: Build Kernel (FAST Mode)
+        run: |
+          # 设置工具链路径
+          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          export CC="ccache clang"
+          
+          cd kernel/oneplus/sm8550
+          
+          # 核心编译参数
+          MAKE_ARGS="LLVM=1 LLVM_IAS=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+                     LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error"
+          
+          # 准备配置
+          make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
+          
+          # 强制开启 Thin LTO 以防内存溢出
+          scripts/config --file out/.config -d LTO_CLANG_FULL
+          scripts/config --file out/.config -e LTO_CLANG_THIN
+          
+          # 执行编译
+          make -j$(nproc --all) O=out $MAKE_ARGS
+          
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            cp out/arch/arm64/boot/Image $GITHUB_WORKSPACE/
+          else
+            echo "未找到编译产物 Image"
+            exit 1
+          fi
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+          cp $GITHUB_WORKSPACE/Image AnyKernel3/
+          cd AnyKernel3
+          sed -i 's/device.name1=test/device.name1=oneplus12/' anykernel.sh
+          zip -r9 ../sukisu.zip * -x .git README.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f "sukisu.zip" ]; then
+            gh release create "$REL_NAME" --title "$REL_NAME" --notes "PixelOS Kernel Build with SukiSU" sukisu.zip
+          else
+            exit 1
+          fi
