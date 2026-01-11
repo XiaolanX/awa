@@ -46,6 +46,7 @@ jobs:
           cd ./KernelSU
           sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
         else
+          make gki_defconfig
           echo "SukiSU 安装失败，目录不存在"
           exit 1
         fi
