@@ -18,17 +18,15 @@ jobs:
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
 
     - name: Install Build Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev ccache pahole python3 zip
-        # 下载 AOSP Clang 编译器 (骁龙 8Gen2 建议使用 r487747c 版本)
-        mkdir -p $GITHUB_WORKSPACE/clang
-        curl -LSs https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz -o clang.tar.gz
-        tar -C $GITHUB_WORKSPACE/clang -xzf clang.tar.gz
+        sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev ccache pahole python3 zip git
+        
+        # 修复：不再使用 curl 下载，改用 git clone 获取编译器（只克隆一层，速度很快）
+        # 这是安卓官方预编译的 Clang 17 左右的版本，适合 sm8550
+        git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 $GITHUB_WORKSPACE/clang-tools
 
     - name: Clone Kernel and Dependencies
       run: |
@@ -45,13 +43,10 @@ jobs:
     - name: Build Kernel with SukiSU
       run: |
         cd kernel/oneplus/sm8550
-        # 注入 SukiSU Ultra 源码
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.KSU_BRANCH }}"
         
-        # 验证并简单配置
         if [ -d "./KernelSU" ]; then
           cd ./KernelSU
-          # 模仿 A.yml 里的版本号清理逻辑
           sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
           cd ..
         else
@@ -61,41 +56,38 @@ jobs:
 
     - name: Build Kernel (FAST Mode)
       run: |
-        # 1. 设置工具链路径
-        export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+        # 1. 动态查找 Clang 路径 (寻找最新版 clang 的 bin 目录)
+        CLANG_BIN=$(find $GITHUB_WORKSPACE/clang-tools -name "clang" -type f | head -1 | xargs dirname)
+        export PATH="$CLANG_BIN:$PATH"
         export CC="ccache clang"
         
-        # 2. 进入内核目录
         cd kernel/oneplus/sm8550
         
-        # 3. 定义来自 A.yml 的编译参数
+        # 2. 编译参数
         MAKE_ARGS="LLVM=1 LLVM_IAS=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                    LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error"
         
-        # 4. 强制使用 Thin LTO 以防止内存溢出并加速
+        # 3. 准备配置并强制开启 Thin LTO (防内存溢出)
         make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
         scripts/config --file out/.config -d LTO_CLANG_FULL
         scripts/config --file out/.config -e LTO_CLANG_THIN
         
-        # 5. 开始正式编译
+        # 4. 执行编译
         make -j$(nproc --all) O=out $MAKE_ARGS
         
-        # 6. 检查 Image
+        # 5. 检查结果
         if [ -f "out/arch/arm64/boot/Image" ]; then
-          echo "编译成功"
           cp out/arch/arm64/boot/Image $GITHUB_WORKSPACE/
         else
-          echo "编译失败，Image 未生成"
+          echo "❌ 错误: 编译未生成 Image 文件"
           exit 1
         fi
 
     - name: Package with AnyKernel3
       run: |
-        # 使用 AnyKernel3 将 Image 封装为卡刷包
         git clone https://github.com/osm0sis/AnyKernel3 --depth=1
         cp $GITHUB_WORKSPACE/Image AnyKernel3/
         cd AnyKernel3
-        # 修改设备代号（sm8550 一般对应一加12系列）
         sed -i 's/device.name1=test/device.name1=oneplus12/' anykernel.sh
         zip -r9 ../sukisu.zip * -x .git README.md
 
@@ -106,6 +98,5 @@ jobs:
         if [ -f "sukisu.zip" ]; then
           gh release create "$REL_NAME" --title "$REL_NAME" --notes "PixelOS Kernel Build with SukiSU" sukisu.zip
         else
-          echo "未找到产物"
           exit 1
         fi
