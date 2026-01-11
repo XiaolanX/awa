@@ -31,6 +31,7 @@ jobs:
       run: |
         cd kernel/oneplus/sm8550
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$BRANCH_NAME"
+        cd ./KernelSU
         sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
 
     - name: Create GitHub Release
