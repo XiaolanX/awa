@@ -35,12 +35,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev ccache pahole python3 zip git wget
           
-          # 下载适配 5.15 内核的 Clang (r487747c)
+          # 使用更稳定的方式获取 Clang: 直接从 Android 编译工具链的官方存储库克隆特定分支
+          # 这里选择 clang-r487747c 对应的分支，且只拉取一层 (depth=1)
           mkdir -p $GITHUB_WORKSPACE/clang
-          cd $GITHUB_WORKSPACE/clang
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz
-          tar -xzf clang-r487747c.tar.gz
-          rm -f clang-r487747c.tar.gz
+          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b main --depth=1 $GITHUB_WORKSPACE/clang-tools
+          
+          # 找到 clang 可执行文件所在的目录并创建软链接
+          CLANG_BIN=$(find $GITHUB_WORKSPACE/clang-tools -name "clang" -type f | head -n 1 | xargs dirname)
+          echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
 
       - name: Clone Kernel and Dependencies
         run: |
@@ -69,13 +71,13 @@ jobs:
 
       - name: Build Kernel (FAST Mode)
         run: |
-          # 设置工具链路径
-          export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+          # 使用之前查找到的路径
+          export PATH="${{ env.CLANG_BIN }}:$PATH"
           export CC="ccache clang"
           
           cd kernel/oneplus/sm8550
           
-          # 核心编译参数
+          # 编译参数
           MAKE_ARGS="LLVM=1 LLVM_IAS=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                      LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error"
           
