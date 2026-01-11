@@ -1,4 +1,4 @@
-name: PixelOS_Ultimate_GKI_V15
+name: PixelOS_Ultimate_GKI_V16
 
 on:
   workflow_dispatch:
@@ -27,7 +27,6 @@ jobs:
 
       - name: Download Official AOSP Clang
         run: |
-          # 参考 FAST_BUILD 逻辑，准备 AOSP 工具链
           mkdir -p $GITHUB_WORKSPACE/clang-aosp
           wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r522817.tar.gz
           tar -xzf clang-r522817.tar.gz -C $GITHUB_WORKSPACE/clang-aosp
@@ -67,16 +66,13 @@ jobs:
           '
           
           echo "--- 2. 清理 ABI 保护与导出限制 ---"
-          # 物理删除受保护的导出列表限制 
-          find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
+          find . -name "BUILD.bazel" -exec sed -i "/\"protected_exports_list\"/d" {} +
           rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
 
           echo "--- 3. 移除构建审查 ---"
-          # 屏蔽 check_defconfig 防止编译中断 [cite: 172]
-          [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
+          [ -f "./build.config.gki" ] && sed -i "s/check_defconfig//" ./build.config.gki || true
 
           echo "--- 4. 物理注入 SUSFS 文件 ---"
-          # 直接同步补丁文件目录到内核源码树 [cite: 116]
           cp ../../susfs4ksu_src/kernel_patches/fs/* ./fs/
           cp ../../susfs4ksu_src/kernel_patches/include/linux/* ./include/linux/
           PATCH_FILE=$(find ../../susfs4ksu_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
@@ -87,52 +83,46 @@ jobs:
             echo "obj-y += kpm/" >> drivers/Makefile
           fi
 
-    - name: Configure GKI Defconfig
-      run: |
-        cd kernel/sm8550
-        GKI_CONF="arch/arm64/configs/gki_defconfig"
-        
-        # 注入全套 SUSFS 隐藏配置链 [cite: 159, 160]
-        sed -i '/CONFIG_KSU/d' "$GKI_CONF"
-        {
-          echo "CONFIG_KSU=y"
-          echo "CONFIG_KPM=y"
-          echo "CONFIG_KSU_SUSFS=y"
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-          echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
-          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
-        } >> "$GKI_CONF"
+      - name: Configure GKI Defconfig
+        run: |
+          cd kernel/sm8550
+          GKI_CONF="arch/arm64/configs/gki_defconfig"
+          sed -i '/CONFIG_KSU/d' "$GKI_CONF"
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KPM=y"
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+          } >> "$GKI_CONF"
 
-    - name: Build GKI Kernel
-      run: |
-        cd kernel/sm8550
-        export PATH="${{ env.CLANG_PATH }}:$PATH"
-        
-        # 强制启用 ThinLTO 优化加速编译 
-        sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' arch/arm64/configs/gki_defconfig
-        
-        # 设置 FAST_BUILD 风格的编译参数并忽略警告错误 
-        export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
-        
-        make O=out $MAKE_ARGS gki_defconfig
-        make -j$(nproc) O=out $MAKE_ARGS Image.gz
-        
-        if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-          mv out/arch/arm64/boot/Image.gz ${GITHUB_WORKSPACE}/PixelOS-Ultimate-GKI.gz
-        else
-          exit 1
-        fi
+      - name: Build GKI Kernel
+        run: |
+          cd kernel/sm8550
+          export PATH="${{ env.CLANG_PATH }}:$PATH"
+          sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' arch/arm64/configs/gki_defconfig
+          export MAKE_ARGS="ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS=-Wno-error"
+          make O=out $MAKE_ARGS gki_defconfig
+          make -j$(nproc) O=out $MAKE_ARGS Image.gz
+          if [ -f "out/arch/arm64/boot/Image.gz" ]; then
+            mv out/arch/arm64/boot/Image.gz ${GITHUB_WORKSPACE}/PixelOS-Ultimate-GKI.gz
+          else
+            exit 1
+          fi
 
-    - name: Upload Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: "GKI-Ultimate-${{ github.run_id }}"
-        name: "OnePlus 12R Ultimate GKI (Fix V15)"
-        files: |
-          *.gz
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "GKI-Ultimate-${{ github.run_id }}"
+          name: "OnePlus 12R Ultimate GKI (Fix V16)"
+          files: |
+            *.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
