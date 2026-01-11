@@ -1,135 +1,105 @@
-name: PixelOS SM8550 GKI Kernel Build
+name: PixelOS_Ultimate_GKI_V35
 
 on:
   workflow_dispatch:
     inputs:
       enable_susfs:
-        description: '启用 SUSFS 支持'
-        type: boolean
-        default: true
-      enable_kpm:
-        description: '启用 KPM 支持'
+        description: '启用 SUSFS'
         type: boolean
         default: true
 
 jobs:
-  build:
-    name: Build PixelOS GKI Kernel
+  Build_Kernel:
+    name: Build GKI Kernel
     runs-on: ubuntu-latest
     
     steps:
-    - name: Maximize Build Space
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 8192
-        temp-reserve-mb: 2048
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 2048
+          remove-dotnet: 'true'
+          remove-android: 'true'
 
-    - name: Install GKI Build Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y bc build-essential flex bison binfmt-support libssl-dev libelf-dev \
-        clang-15 lld-15 llvm-15 python3-pip git-lfs gawk dos2unix rsync libncurses-dev jq zip
-        sudo ln -sf /usr/bin/clang-15 /usr/bin/clang
-        sudo ln -sf /usr/bin/ld.lld-15 /usr/bin/ld.lld
-        sudo ln -sf /usr/bin/llvm-nm-15 /usr/bin/llvm-nm
+      - name: Setup Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential flex bison binfmt-support libssl-dev libelf-dev \
+          clang-15 lld-15 llvm-15 python3-pip git-lfs gawk dos2unix rsync libncurses-dev jq zip
+          sudo ln -sf /usr/bin/clang-15 /usr/bin/clang
+          sudo ln -sf /usr/bin/ld.lld-15 /usr/bin/ld.lld
+          sudo ln -sf /usr/bin/llvm-nm-15 /usr/bin/llvm-nm
 
-    - name: Clone Kernel Source
-      run: |
-        git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git \
-            --depth=1 -b sixteen-qpr1 kernel_workspace/kernel
+      - name: Clone Source
+        run: |
+          git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel
 
-    - name: Get SUSFS & KPM
-      if: inputs.enable_susfs || inputs.enable_kpm
-      run: |
-        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs_src
-        mkdir -p kernel_workspace/kernel/drivers/kpm
-        curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel_workspace/kernel/drivers/kpm/Kbuild
-        curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/kpm.c -o kernel_workspace/kernel/drivers/kpm/kpm.c
+      - name: Get SUSFS & KPM
+        run: |
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 susfs_src
+          mkdir -p kernel/drivers/kpm
+          curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/Kbuild -o kernel/drivers/kpm/Kbuild
+          curl -LSs https://raw.githubusercontent.com/rifsxd/KPM/main/kpm/kpm.c -o kernel/drivers/kpm/kpm.c
 
-    - name: Surgical Integration (The A-txt Way)
-      run: |
-        cd kernel_workspace/kernel
-        # 1. 物理清理 ABI 保护限制
-        find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
-        rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
-        
-        # 2. 参考资料：彻底屏蔽 check_defconfig
-        [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
-        
-        # 3. 递归净化 Kconfig 及其对应的 Makefile
-        python3 -c '
-        import os, re
-        def clean_kconfig(file_path):
-            if not os.path.exists(file_path): return
-            with open(file_path, "r") as f: lines = f.readlines()
-            new_lines, changed = [], False
-            for line in lines:
-                match = re.search(r"source\s+\"([^\"]+)\"", line)
-                if match:
-                    if not os.path.exists(os.path.join(os.path.dirname(file_path), match.group(1))):
-                        changed = True; continue
-                new_lines.append(line)
-            if changed:
-                with open(file_path, "w") as f: f.writelines(new_lines)
-        for root, _, files in os.walk("."):
-            for file in files:
-                if file in ["Kconfig", "Kbuild", "Makefile"]:
-                    clean_kconfig(os.path.join(root, file))
-        '
+      - name: Surgical Integration
+        run: |
+          cd kernel
+          # 1. 物理移除 ABI 限制
+          find . -name "BUILD.bazel" -exec sed -i '/"protected_exports_list"/d' {} +
+          rm -f android/abi_gki_protected_exports_* 2>/dev/null || true
+          # 2. 屏蔽 check_defconfig
+          [ -f "./build.config.gki" ] && sed -i 's/check_defconfig//' ./build.config.gki || true
+          # 3. 递归清理失效路径 (关键 Python 脚本)
+          python3 -c '
+          import os, re
+          def clean(f):
+              if not os.path.exists(f): return
+              with open(f,"r") as r: lines = r.readlines()
+              with open(f,"w") as w:
+                  for l in lines:
+                      m = re.search(r"source\s+\"([^\"]+)\"", l)
+                      if m and not os.path.exists(os.path.join(os.path.dirname(f), m.group(1))): continue
+                      w.write(l)
+          for r, d, fs in os.walk("."):
+              for f in fs:
+                  if f in ["Kconfig", "Kbuild", "Makefile"]: clean(os.path.join(r, f))
+          '
+          # 4. 彻底禁用 Headers 安装 (解决 image_16cc2b.png 报错)
+          sed -i 's/headers_install//g' Makefile
+          sed -i 's/headers_check//g' Makefile
+          # 5. 注入 SUSFS
+          cp ../susfs_src/kernel_patches/fs/* ./fs/
+          cp ../susfs_src/kernel_patches/include/linux/* ./include/linux/
+          PATCH=$(find ../susfs_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
+          patch -p1 < "$PATCH" || echo "Skip patch conflict"
+          echo "obj-y += kpm/" >> drivers/Makefile
 
-        # 4. 暴力压制：在所有 Makefile 中屏蔽 Headers 检查
-        find . -name "Makefile" -exec sed -i 's/headers_install//g' {} +
-        find . -name "Makefile" -exec sed -i 's/headers_check//g' {} +
-
-        # 5. 注入 SUSFS & KPM
-        if [ "${{ inputs.enable_susfs }}" = "true" ]; then
-          cp ../../susfs_src/kernel_patches/fs/* ./fs/
-          cp ../../susfs_src/kernel_patches/include/linux/* ./include/linux/
-          PATCH_FILE=$(find ../../susfs_src/kernel_patches/ -name "*add_susfs_in_gki-android14-6.1.patch" | head -n 1)
-          patch -p1 < "$PATCH_FILE" || echo "Patch conflict ignored."
-        fi
-        [ "${{ inputs.enable_kpm }}" = "true" ] && echo "obj-y += kpm/" >> drivers/Makefile
-
-    - name: Build GKI Kernel
-      run: |
-        cd kernel_workspace/kernel
-        export ARCH=arm64
-        export LLVM=1
-        export LLVM_IAS=1
-        
-        GKI_CONF="arch/arm64/configs/gki_defconfig"
-        # 参考资料：开启 ThinLTO 以保命
-        sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' "$GKI_CONF"
-        {
-          echo "CONFIG_KSU=y"
-          [ "${{ inputs.enable_kpm }}" = "true" ] && echo "CONFIG_KPM=y"
-          echo "CONFIG_KSU_SUSFS=y"
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
-          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
-        } >> "$GKI_CONF"
-        
-        # 核心改变：我们不再跑默认全量 make，只请求二进制目标
-        make ARCH=$ARCH LLVM=$LLVM LLVM_IAS=$LLVM_IAS CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" gki_defconfig
-        make ARCH=$ARCH LLVM=$LLVM LLVM_IAS=$LLVM_IAS CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" -j$(nproc) Image
-        
-        # 手动压缩，不给系统报错的机会
-        if [ -f "arch/arm64/boot/Image" ]; then
+      - name: Build Kernel
+        run: |
+          cd kernel
+          GKI_CONF="arch/arm64/configs/gki_defconfig"
+          sed -i 's/^CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_THIN=y/' "$GKI_CONF"
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KPM=y"
+            echo "CONFIG_KSU_SUSFS=y"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
+          } >> "$GKI_CONF"
+          
+          # 直接执行编译目标，绝不给 Makefile 运行 headers_install 的机会
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" gki_defconfig
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- KCFLAGS="-Wno-error -fcommon" -j$(nproc) Image
+          
+          # 手动压包
           gzip -c arch/arm64/boot/Image > arch/arm64/boot/Image.gz
-        fi
 
-    - name: Create Kernel Package
-      run: |
-        mkdir -p gki_package
-        cp kernel_workspace/kernel/arch/arm64/boot/Image.gz gki_package/ 2>/dev/null || cp kernel_workspace/kernel/arch/arm64/boot/Image gki_package/
-        cp kernel_workspace/kernel/.config gki_package/kernel.config
-        echo "Build Date: $(date)" > gki_package/version.txt
-
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: PixelOS-GKI-Build
-        path: gki_package/
+      - name: Upload
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "GKI-V35-${{ github.run_id }}"
+          name: "OnePlus 12R GKI Final V35"
+          files: kernel/arch/arm64/boot/Image.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
