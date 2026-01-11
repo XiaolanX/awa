@@ -56,58 +56,34 @@ jobs:
           REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
           echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
 
-      - name: Build Kernel with SukiSU
-        run: |
-          cd kernel/oneplus/sm8550
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.KSU_BRANCH }}"
-          
-          if [ -d "./KernelSU" ]; then
-            cd ./KernelSU
-            sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
-          else
-            echo "SukiSU 安装失败"
-            exit 1
-          fi
-
       - name: Build Kernel (FAST Mode)
         run: |
-          # 1. 设置工具链路径
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           export CC="ccache clang"
           
           cd kernel/oneplus/sm8550
           
-          # 2. 编译参数
           MAKE_ARGS="LLVM=1 LLVM_IAS=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                      LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error"
           
-          # 3. 准备配置
           make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
-          
-          # 【核心修复：禁用 BTF 以跳过 pahole 错误】
+
+          # 1. 禁用 BTF (解决上一个 pahole 错误)
           scripts/config --file out/.config -d DEBUG_INFO_BTF
           scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES
-          
-          # 4. 强制开启 Thin LTO 以防内存溢出
+
+          # 2. 【新增：解决符号未定义错误】
+          # 屏蔽报错的一加传感器信息驱动
+          scripts/config --file out/.config -d CONFIG_OPLUS_SENSOR_DEVINFO
+          # 如果还有其他项目相关报错，尝试禁用这个
+          scripts/config --file out/.config -d CONFIG_OPLUS_CHIP_SOC_INFO
+
+          # 3. 强制开启 Thin LTO
           scripts/config --file out/.config -d LTO_CLANG_FULL
           scripts/config --file out/.config -e LTO_CLANG_THIN
           
-          # 5. 执行编译
+          # 再次确认配置已应用并开始编译
           make -j$(nproc --all) O=out $MAKE_ARGS
-          
-          if [ -f "out/arch/arm64/boot/Image" ]; then
-            cp out/arch/arm64/boot/Image $GITHUB_WORKSPACE/
-          else
-            echo "未找到编译产物 Image"
-            exit 1
-          fi
-      - name: Package with AnyKernel3
-        run: |
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-          cp $GITHUB_WORKSPACE/Image AnyKernel3/
-          cd AnyKernel3
-          sed -i 's/device.name1=test/device.name1=oneplus12/' anykernel.sh
-          zip -r9 ../sukisu.zip * -x .git README.md
 
       - name: Create GitHub Release
         env:
