@@ -12,7 +12,6 @@ jobs:
   PixelOS_Kernel_CI:
     name: PixelOS Kernel CI
     runs-on: ubuntu-latest
-    # 核心修复：授予 Action 写入权限以创建 Release
     permissions:
       contents: write
 
@@ -22,49 +21,91 @@ jobs:
       with:
         fetch-depth: 1
 
+    - name: Install Build Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev ccache pahole python3 zip
+        # 下载 AOSP Clang 编译器 (骁龙 8Gen2 建议使用 r487747c 版本)
+        mkdir -p $GITHUB_WORKSPACE/clang
+        curl -LSs https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r487747c.tar.gz -o clang.tar.gz
+        tar -C $GITHUB_WORKSPACE/clang -xzf clang.tar.gz
+
     - name: Clone Kernel and Dependencies
       run: |
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
         git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
-    
-    - name: Setup release name
+
+    - name: Setup Release Name
       run: |
-        rm -rf ${GITHUB_WORKSPACE}/*.zip
         cd kernel/oneplus/sm8550
         SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
         REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
         echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
 
-    - name: Build Kernel with sukisu
+    - name: Build Kernel with SukiSU
       run: |
         cd kernel/oneplus/sm8550
-        # 修复：使用输入的分支变量，并确保 drivers 目录存在（setup.sh 需要）
+        # 注入 SukiSU Ultra 源码
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.KSU_BRANCH }}"
         
-        # 只有成功进入目录才执行修改
+        # 验证并简单配置
         if [ -d "./KernelSU" ]; then
           cd ./KernelSU
+          # 模仿 A.yml 里的版本号清理逻辑
           sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
+          cd ..
         else
-          make gki_defconfig
-          echo "SukiSU 安装失败，目录不存在"
+          echo "SukiSU 安装失败"
           exit 1
         fi
 
-    # 模拟编译步骤 (你需要在这里加入真正的编译逻辑，生成 sukisu.zip)
-    - name: Mock Zip Creation
+    - name: Build Kernel (FAST Mode)
       run: |
-        touch sukisu.zip
+        # 1. 设置工具链路径
+        export PATH="$GITHUB_WORKSPACE/clang/bin:$PATH"
+        export CC="ccache clang"
+        
+        # 2. 进入内核目录
+        cd kernel/oneplus/sm8550
+        
+        # 3. 定义来自 A.yml 的编译参数
+        MAKE_ARGS="LLVM=1 LLVM_IAS=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+                   LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error"
+        
+        # 4. 强制使用 Thin LTO 以防止内存溢出并加速
+        make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
+        scripts/config --file out/.config -d LTO_CLANG_FULL
+        scripts/config --file out/.config -e LTO_CLANG_THIN
+        
+        # 5. 开始正式编译
+        make -j$(nproc --all) O=out $MAKE_ARGS
+        
+        # 6. 检查 Image
+        if [ -f "out/arch/arm64/boot/Image" ]; then
+          echo "编译成功"
+          cp out/arch/arm64/boot/Image $GITHUB_WORKSPACE/
+        else
+          echo "编译失败，Image 未生成"
+          exit 1
+        fi
+
+    - name: Package with AnyKernel3
+      run: |
+        # 使用 AnyKernel3 将 Image 封装为卡刷包
+        git clone https://github.com/osm0sis/AnyKernel3 --depth=1
+        cp $GITHUB_WORKSPACE/Image AnyKernel3/
+        cd AnyKernel3
+        # 修改设备代号（sm8550 一般对应一加12系列）
+        sed -i 's/device.name1=test/device.name1=oneplus12/' anykernel.sh
+        zip -r9 ../sukisu.zip * -x .git README.md
 
     - name: Create GitHub Release
       env:
-        # 核心修复：显式提供授权变量
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        # 确保文件存在再上传
         if [ -f "sukisu.zip" ]; then
           gh release create "$REL_NAME" --title "$REL_NAME" --notes "PixelOS Kernel Build with SukiSU" sukisu.zip
         else
-          echo "未找到编译产物 sukisu.zip"
+          echo "未找到产物"
           exit 1
         fi
