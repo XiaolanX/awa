@@ -29,7 +29,28 @@ jobs:
         run: |
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 sm8550
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 sm8550-modules
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b master
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
+
+          - name: 应用 SUSFS 内核补丁
+        run: |
+          cd sm8550
+          # 1. 拷贝 SUSFS 核心组件到内核源码树 
+          # 注意：master 分支的路径通常为 kernel_patches/fs/ 和 kernel_patches/include/
+          cp ../susfs4ksu/kernel_patches/fs/* ./fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          
+          # 2. 应用内核全局补丁 (针对 GKI 5.15)
+          # 由于你是 5.15 内核，我们需要寻找 master 中对应的 5.15 补丁文件
+          # 如果文件名不一致，请检查 susfs4ksu/kernel_patches/ 目录
+          PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-5.15.patch"
+          
+          if [ -f "$PATCH_FILE" ]; then
+            echo "正在应用补丁: $PATCH_FILE"
+            patch -p1 < "$PATCH_FILE" || echo "⚠️ 部分补丁行可能冲突，请检查日志"
+          else
+            echo "❌ 未找到 5.15 补丁文件，尝试搜索替代补丁..."
+            find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" -exec patch -p1 < {} \;
+          fi
 
       - name: 集成 SukiSU-Ultra
         working-directory: sm8550
