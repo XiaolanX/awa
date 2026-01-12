@@ -47,23 +47,25 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $CONF
           echo "CONFIG_KPM=y" >> $CONF
 
-      - name: 应用 SUSFS 内核补丁
+      - name: 应用 SUSFS 补丁
         run: |
           cd sm8550
-          # 确保目标文件夹存在（虽然内核源码肯定有，但稳一手）
-          mkdir -p fs include/linux
-          
-          # 拷贝文件
+          # 1. 拷贝 SUSFS 核心驱动文件到内核源码树 
+          # 这里直接操作根目录下的 fs 和 include 
           cp -f ../susfs4ksu/kernel_patches/fs/* ./fs/
           cp -f ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
           
-          # 应用补丁
+          # 2. 选择并应用内核全局补丁 
+          # 针对你的 5.15 内核，我们优先尝试通用的 5.15 补丁
+          # 使用 --fuzz=3 允许补丁工具在行号对不上时自动寻找匹配项 
           PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
+          
           if [ -f "$PATCH_FILE" ]; then
-            patch -p1 < "$PATCH_FILE"
+            echo "✅ 正在应用补丁: $PATCH_FILE"
+            patch -p1 --fuzz=3 < "$PATCH_FILE" || echo "⚠️ 补丁应用时存在偏移，请确认 fs/open.c 是否修改成功"
           else
-            echo "找不到指定补丁，尝试自动匹配..."
-            find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" -exec patch -p1 < {} \;
+            echo "❌ 未找到 5.15 补丁，尝试自动搜索并应用..."
+            find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" -exec patch -p1 --fuzz=3 < {} \;
           fi
 
       - name: 强制修改内核 SUBLEVEL 为 196
