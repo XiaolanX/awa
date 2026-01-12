@@ -68,7 +68,7 @@ jobs:
             find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" -exec patch -p1 < {} \;
           fi
 
-          - name: 强制修改内核 SUBLEVEL 为 196
+        - name: 强制修改内核 SUBLEVEL 为 196
         working-directory: sm8550
         run: |
           # 使用 sed 匹配 Makefile 开头的 SUBLEVEL 并替换为 196
