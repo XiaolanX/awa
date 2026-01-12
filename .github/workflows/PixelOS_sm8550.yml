@@ -29,7 +29,7 @@ jobs:
         run: |
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 sm8550
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 sm8550-modules
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.1
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b master
 
       - name: 集成 SukiSU-Ultra
         working-directory: sm8550
