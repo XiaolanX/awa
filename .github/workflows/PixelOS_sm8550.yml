@@ -1,127 +1,107 @@
-name: PixelOS_Kernel_CI-aston
+name: Build Aston Kernel (SukiSU + SUSFS + KPM + AK3)
 
 on:
   workflow_dispatch:
-    inputs:
-      KSU_BRANCH:
-        description: 'SukiSU 分支 (如 main)'
-        required: true
-        default: 'main'
 
 jobs:
-  PixelOS_Kernel_CI:
-    name: PixelOS Kernel CI
+  build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Maximize Build Space
+      - name: 深度清理磁盘空间
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf /usr/lib/jvm
-          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
+          # 腾出空间给巨大的 AOSP Clang
 
-      - name: Install Build Dependencies
+      - name: 准备依赖
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev ccache pahole python3 zip git wget
-          
-          mkdir -p $GITHUB_WORKSPACE/clang-tools
-          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b main --depth=1 $GITHUB_WORKSPACE/clang-tools
-          
-          CLANG_BIN=$(find $GITHUB_WORKSPACE/clang-tools -name "clang" -type f | head -n 1 | xargs dirname)
-          echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
+          sudo apt-get install -y bc build-essential flex bison lld llvm sed \
+            libssl-dev libelf-dev libncurses-dev libncurses5 binutils-aarch64-linux-gnu curl git zip
 
-      - name: Clone Kernel and Dependencies
+      - name: 下载 AOSP Clang (r547379)
         run: |
-          git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
-          git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
-    
-      - name: Setup Release Name
-        run: |
-          cd kernel/oneplus/sm8550
-          SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
-          REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
-          echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
+          mkdir -p $GITHUB_WORKSPACE/toolchains
+          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 --depth=1 -b android16-release $GITHUB_WORKSPACE/toolchains/clang-android16-release
 
-      - name: Build Kernel with SukiSU
+      - name: 获取源码与补丁
         run: |
-          cd kernel/oneplus/sm8550
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.KSU_BRANCH }}"
-          
-          if [ -d "./KernelSU" ]; then
-            cd ./KernelSU
-            sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
-          else
-            echo "SukiSU 安装失败"
-            exit 1
-          fi
+          git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 sm8550
+          git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 sm8550-modules
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android15-6.1
 
-      - name: Build Kernel (FAST Mode)
+      - name: 集成 SukiSU-Ultra
+        working-directory: sm8550
         run: |
-          export PATH="${{ env.CLANG_BIN }}:$PATH"
-          export CC="ccache clang"
-          
-          cd kernel/oneplus/sm8550
-          
-          MAKE_ARGS="LLVM=1 LLVM_IAS=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-                     LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error"
-          
-          # 1. 生成配置
-          make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
-          
-          # 2. 修复 BTF 报错
-          scripts/config --file out/.config -d DEBUG_INFO_BTF
-          scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s master
 
-          # 3. 彻底消除 get_project/qcom_smem_alloc 符号引用
-          scripts/config --file out/.config -d CONFIG_OPLUS_SENSOR_DEVINFO
-          scripts/config --file out/.config -d CONFIG_OPLUS_FEATURE_CHIP_SOC_INFO
-          scripts/config --file out/.config -d CONFIG_OPLUS_CHIP_SOC_INFO
-          scripts/config --file out/.config -d CONFIG_OPLUS_SOC_INFO
-          scripts/config --file out/.config -e CONFIG_QCOM_SMEM 
-          
-          # 3.2 强行屏蔽报错源码
-          rm -f drivers/soc/oplus/sensor/oplus_sensor_devinfo.c
-          
-          # 4. 强制开启 Thin LTO
-          scripts/config --file out/.config -d LTO_CLANG_FULL
-          scripts/config --file out/.config -e LTO_CLANG_THIN
-          
-          # 5. 应用配置并编译
-          make -j$(nproc --all) O=out $MAKE_ARGS olddefconfig
-          make -j$(($(nproc --all) - 2)) O=out $MAKE_ARGS
-          
-          if [ -f "out/arch/arm64/boot/Image" ]; then
-            cp out/arch/arm64/boot/Image $GITHUB_WORKSPACE/
-          else
-            echo "错误：未找到编译产物 Image"
-            exit 1
-          fi
-
-      - name: Package with AnyKernel3
+      - name: 应用 SUSFS 补丁
+        working-directory: sm8550
         run: |
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-          cp $GITHUB_WORKSPACE/Image AnyKernel3/
-          cd AnyKernel3
-          sed -i 's/device.name1=test/device.name1=oneplus12/' anykernel.sh
-          zip -r9 ../sukisu.zip * -x .git README.md
+          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android15-6.1.patch ./
+          cp ../susfs4ksu/kernel_patches/fs/* ./fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          patch -p1 < 50_add_susfs_in_gki-android15-6.1.patch || echo "Patch partially applied"
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 注入内核配置 (KSU/SUSFS/KPM)
+        working-directory: sm8550
         run: |
-          if [ -f "sukisu.zip" ]; then
-            gh release create "$REL_NAME" --title "$REL_NAME" --notes "PixelOS Kernel Build with SukiSU" sukisu.zip
-          else
-            exit 1
-          fi
+          CONF="arch/arm64/configs/vendor/kalama_GKI.config"
+          echo "CONFIG_KSU=y" >> $CONF
+          echo "CONFIG_KSU_SUSFS=y" >> $CONF
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $CONF
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $CONF
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $CONF
+          echo "CONFIG_KPM=y" >> $CONF
+
+      - name: 执行内核编译
+        working-directory: sm8550
+        run: |
+          CLANG_BIN="$GITHUB_WORKSPACE/toolchains/clang-android16-release/clang-r547379/bin"
+          export PATH="${CLANG_BIN}:$PATH"
+          export LLVM=1
+          export LLVM_IAS=1
+          export CC="${CLANG_BIN}/clang"
+          export HOSTCC="${CLANG_BIN}/clang"
+          export HOSTCXX="${CLANG_BIN}/clang++"
+          export LD="${CLANG_BIN}/ld.lld"
+          export AR="${CLANG_BIN}/llvm-ar"
+          export NM="${CLANG_BIN}/llvm-nm"
+          export OBJCOPY="${CLANG_BIN}/llvm-objcopy"
+          export OBJDUMP="${CLANG_BIN}/llvm-objdump"
+          export STRIP="${CLANG_BIN}/llvm-strip"
+          
+          make ARCH=arm64 O=out \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_COMPAT=arm-linux-androideabi- \
+            gki_defconfig vendor/kalama_GKI.config vendor/oplus/kalama_GKI.config vendor/debugfs.config
+
+          make -j$(nproc) ARCH=arm64 O=out \
+            CROSS_COMPILE=aarch64-linux-android- \
+            CROSS_COMPILE_COMPAT=arm-linux-androideabi-
+
+      - name: 准备 AnyKernel3 刷机包
+        run: |
+          git clone https://github.com/Numbersf/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+          
+          # 获取编译出的 Image
+          RAW_IMAGE="sm8550/out/arch/arm64/boot/Image"
+          
+          # 执行 KPM patch_linux 修补
+          curl -LO https://raw.githubusercontent.com/Numbersf/Action-Build/main/patches/patch_linux
+          chmod +x patch_linux
+          ./patch_linux "$RAW_IMAGE"
+          
+          # 将修补后的 oImage 放入 AK3 目录并重命名为 Image
+          mv oImage ./AnyKernel3/Image
+
+      - name: 打包刷机包
+        working-directory: AnyKernel3
+        run: |
+          zip -r9 ../Aston-SukiSU-Ultra.zip * -x .git README.md
+
+      - name: 上传刷机包
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aston-Kernel-AnyKernel3
+          path: Aston-SukiSU-Ultra.zip
