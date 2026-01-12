@@ -86,11 +86,17 @@ jobs:
           scripts/config --file out/.config -d DEBUG_INFO_BTF
           scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES
 
-          # 3. 修复一加驱动符号未定义报错 (get_project / qcom_smem_alloc)
-          # 参考 A.yml 中通过修改 config 解决冲突的思路
+          # 3. 彻底解决一加驱动符号未定义问题（核心修复）
+          # 3.1 禁用所有oplus_sensor_devinfo相关配置
           scripts/config --file out/.config -d CONFIG_OPLUS_SENSOR_DEVINFO
           scripts/config --file out/.config -d CONFIG_OPLUS_FEATURE_CHIP_SOC_INFO
           scripts/config --file out/.config -d CONFIG_OPLUS_CHIP_SOC_INFO
+          # 3.2 启用高通SMEM（解决qcom_smem_alloc依赖）
+          scripts/config --file out/.config -e CONFIG_QCOM_SMEM
+          # 3.3 禁用oplus相关的SOC_INFO模块（彻底排除引用）
+          scripts/config --file out/.config -d CONFIG_OPLUS_SOC_INFO
+          # 3.4 临时屏蔽oplus_sensor_devinfo.c编译（兜底方案）
+          sed -i '/obj-\$(CONFIG_OPLUS_SENSOR_DEVINFO) += oplus_sensor_devinfo.o/d' drivers/soc/oplus/sensor/Makefile
           
           # 4. 强制开启 Thin LTO 以适配 GitHub 环境
           scripts/config --file out/.config -d LTO_CLANG_FULL
@@ -98,7 +104,10 @@ jobs:
           
           # 5. 应用配置并编译
           make -j$(nproc --all) O=out $MAKE_ARGS olddefconfig
-          make -j$(nproc --all) O=out $MAKE_ARGS
+          # 验证配置是否生效（可选，用于调试）
+          grep -E "CONFIG_OPLUS_SENSOR_DEVINFO|CONFIG_QCOM_SMEM" out/.config
+          # 编译内核（降低并发数，避免GitHub Runner资源不足）
+          make -j$(($(nproc --all) - 2)) O=out $MAKE_ARGS
           
           if [ -f "out/arch/arm64/boot/Image" ]; then
             cp out/arch/arm64/boot/Image $GITHUB_WORKSPACE/
