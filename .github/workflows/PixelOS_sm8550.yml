@@ -66,24 +66,35 @@ jobs:
           MAKE_ARGS="LLVM=1 LLVM_IAS=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
                      LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error"
           
+          # 生成默认配置
           make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
 
           # 1. 禁用 BTF (解决上一个 pahole 错误)
           scripts/config --file out/.config -d DEBUG_INFO_BTF
           scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES
 
-          # 2. 【新增：解决符号未定义错误】
-          # 屏蔽报错的一加传感器信息驱动
+          # 2. 【核心修复：强行禁用报错的 Oplus 驱动】
+          # 这些驱动依赖 get_project 和 qcom_smem_alloc，但在极速模式下缺少源码支持
           scripts/config --file out/.config -d CONFIG_OPLUS_SENSOR_DEVINFO
-          # 如果还有其他项目相关报错，尝试禁用这个
+          scripts/config --file out/.config -d CONFIG_OPLUS_FEATURE_CHIP_SOC_INFO
           scripts/config --file out/.config -d CONFIG_OPLUS_CHIP_SOC_INFO
-
-          # 3. 强制开启 Thin LTO
+          
+          # 3. 开启 Thin LTO 以防 GitHub Action 内存溢出
           scripts/config --file out/.config -d LTO_CLANG_FULL
           scripts/config --file out/.config -e LTO_CLANG_THIN
           
-          # 再次确认配置已应用并开始编译
+          # 再次运行 olddefconfig 确保配置生效
+          make -j$(nproc --all) O=out $MAKE_ARGS olddefconfig
+
+          # 4. 执行编译
           make -j$(nproc --all) O=out $MAKE_ARGS
+          
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            cp out/arch/arm64/boot/Image $GITHUB_WORKSPACE/
+          else
+            echo "❌ 编译失败，Image 未生成"
+            exit 1
+          fi
 
       - name: Create GitHub Release
         env:
