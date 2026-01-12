@@ -10,7 +10,6 @@ jobs:
       - name: 深度清理磁盘空间
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
-          # 腾出空间给巨大的 AOSP Clang
           
       - name: 准备依赖
         run: |
@@ -29,7 +28,8 @@ jobs:
         run: |
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 sm8550
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 sm8550-modules
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
+          # 这里建议还是用 master，因为补丁最全
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b master
 
       - name: 集成 SukiSU-Ultra
         working-directory: sm8550
@@ -50,31 +50,19 @@ jobs:
       - name: 应用 SUSFS 内核补丁
         run: |
           cd sm8550
-          # 1. 拷贝 SUSFS 核心组件到内核源码树 
-          # 注意：master 分支的路径通常为 kernel_patches/fs/ 和 kernel_patches/include/
           cp ../susfs4ksu/kernel_patches/fs/* ./fs/
           cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
-          
-          # 2. 应用内核全局补丁 (针对 GKI 5.15)
-          # 由于你是 5.15 内核，我们需要寻找 master 中对应的 5.15 补丁文件
-          # 如果文件名不一致，请检查 susfs4ksu/kernel_patches/ 目录
           PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android14-5.15.patch"
-          
           if [ -f "$PATCH_FILE" ]; then
-            echo "正在应用补丁: $PATCH_FILE"
-            patch -p1 < "$PATCH_FILE" || echo "⚠️ 部分补丁行可能冲突，请检查日志"
+            patch -p1 < "$PATCH_FILE" || echo "Patch conflict ignored"
           else
-            echo "❌ 未找到 5.15 补丁文件，尝试搜索替代补丁..."
             find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" -exec patch -p1 < {} \;
           fi
 
-        - name: 强制修改内核 SUBLEVEL 为 196
+      - name: 强制修改内核 SUBLEVEL 为 196
         working-directory: sm8550
         run: |
-          # 使用 sed 匹配 Makefile 开头的 SUBLEVEL 并替换为 196
           sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 196/' Makefile
-          
-          # 验证修改是否成功
           NEW_VER=$(head -n 5 Makefile | grep -E "^(VERSION|PATCHLEVEL|SUBLEVEL)" | awk '{print $3}' | tr '\n' '.' | sed 's/.$//')
           echo "✅ 当前内核版本已修改为: $NEW_VER"
 
@@ -108,16 +96,10 @@ jobs:
         run: |
           git clone https://github.com/Numbersf/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
-          
-          # 获取编译出的 Image
           RAW_IMAGE="sm8550/out/arch/arm64/boot/Image"
-          
-          # 执行 KPM patch_linux 修补
           curl -LO https://raw.githubusercontent.com/Numbersf/Action-Build/main/patches/patch_linux
           chmod +x patch_linux
           ./patch_linux "$RAW_IMAGE"
-          
-          # 将修补后的 oImage 放入 AK3 目录并重命名为 Image
           mv oImage ./AnyKernel3/Image
 
       - name: 打包刷机包
