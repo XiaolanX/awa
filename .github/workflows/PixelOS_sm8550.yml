@@ -7,16 +7,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: 深度清理磁盘空间
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost
-          # 腾出空间给巨大的 AOSP Clang
-
       - name: 准备依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison lld llvm sed \
-            libssl-dev libelf-dev libncurses-dev libncurses5 binutils-aarch64-linux-gnu curl git zip
+            libssl-dev libelf-dev libncurses-dev binutils-aarch64-linux-gnu curl git zip
 
       - name: 下载 AOSP Clang (r547379)
         run: |
