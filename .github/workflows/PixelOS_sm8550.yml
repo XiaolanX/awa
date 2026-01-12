@@ -1,74 +1,3 @@
-name: PixelOS_Kernel_CI-aston
-
-on:
-  workflow_dispatch:
-    inputs:
-      KSU_BRANCH:
-        description: 'SukiSU 分支 (如 main)'
-        required: true
-        default: 'main'
-
-jobs:
-  PixelOS_Kernel_CI:
-    name: PixelOS Kernel CI
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Maximize Build Space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf /usr/lib/jvm
-          df -h
-
-      - name: Install Build Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev ccache pahole python3 zip git wget
-          
-          # 使用 Git Clone 获取 Clang 以绕过 Google Source 的 wget 400 错误
-          mkdir -p $GITHUB_WORKSPACE/clang-tools
-          git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b main --depth=1 $GITHUB_WORKSPACE/clang-tools
-          
-          # 自动定位 clang 可执行文件路径
-          CLANG_BIN=$(find $GITHUB_WORKSPACE/clang-tools -name "clang" -type f | head -n 1 | xargs dirname)
-          echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
-
-      - name: Clone Kernel and Dependencies
-        run: |
-          git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550
-          git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 kernel/oneplus/sm8550-modules
-    
-      - name: Setup Release Name
-        run: |
-          cd kernel/oneplus/sm8550
-          SUBLEVEL=$(grep "^SUBLEVEL =" Makefile | awk '{print $3}')
-          REL_NAME="PixelOS_OPSM8550-v5.15.${SUBLEVEL}-$(date +"%Y%m%d")"
-          echo "REL_NAME=${REL_NAME}" >> $GITHUB_ENV
-
-      - name: Build Kernel with SukiSU
-        run: |
-          cd kernel/oneplus/sm8550
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ github.event.inputs.KSU_BRANCH }}"
-          
-          if [ -d "./KernelSU" ]; then
-            cd ./KernelSU
-            # 清理并修正 Kbuild 版本信息
-            sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
-          else
-            echo "SukiSU 安装失败"
-            exit 1
-          fi
-
       - name: Build Kernel (FAST Mode)
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
@@ -86,17 +15,27 @@ jobs:
           scripts/config --file out/.config -d DEBUG_INFO_BTF
           scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES
 
-          # 3. 彻底解决一加驱动符号未定义问题（核心修复）
-          # 3.1 禁用所有oplus_sensor_devinfo相关配置
+          # 3. 终极解决：彻底消除 get_project/qcom_smem_alloc 符号引用（核心修改）
+          # 3.1 禁用所有oplus相关配置（兜底）
           scripts/config --file out/.config -d CONFIG_OPLUS_SENSOR_DEVINFO
           scripts/config --file out/.config -d CONFIG_OPLUS_FEATURE_CHIP_SOC_INFO
           scripts/config --file out/.config -d CONFIG_OPLUS_CHIP_SOC_INFO
-          # 3.2 启用高通SMEM（解决qcom_smem_alloc依赖）
-          scripts/config --file out/.config -e CONFIG_QCOM_SMEM
-          # 3.3 禁用oplus相关的SOC_INFO模块（彻底排除引用）
           scripts/config --file out/.config -d CONFIG_OPLUS_SOC_INFO
-          # 3.4 临时屏蔽oplus_sensor_devinfo.c编译（兜底方案）
-          sed -i '/obj-\$(CONFIG_OPLUS_SENSOR_DEVINFO) += oplus_sensor_devinfo.o/d' drivers/soc/oplus/sensor/Makefile
+          scripts/config --file out/.config -e CONFIG_QCOM_SMEM # 启用SMEM解决qcom_smem_alloc依赖
+          
+          # 3.2 强制屏蔽oplus_sensor_devinfo.c的编译（适配不同Makefile格式）
+          # 方案A：直接删除该文件（最彻底）
+          rm -f drivers/soc/oplus/sensor/oplus_sensor_devinfo.c
+          # 备用方案（如果不想删除文件）：注释Makefile中所有关联该行
+          # sed -i '/oplus_sensor_devinfo\.o/s/^/#/' drivers/soc/oplus/sensor/Makefile
+          
+          # 3.3 兜底：如果文件没删干净，直接注释调用get_project的代码行（防止漏网）
+          if [ -f "drivers/soc/oplus/sensor/oplus_sensor_devinfo.c" ]; then
+            # 注释掉调用get_project的行（第151行）
+            sed -i '151s/^/\/\//' drivers/soc/oplus/sensor/oplus_sensor_devinfo.c
+            # 注释掉调用qcom_smem_alloc的行（第1463行）
+            sed -i '1463s/^/\/\//' drivers/soc/oplus/sensor/oplus_sensor_devinfo.c
+          fi
           
           # 4. 强制开启 Thin LTO 以适配 GitHub 环境
           scripts/config --file out/.config -d LTO_CLANG_FULL
@@ -104,32 +43,12 @@ jobs:
           
           # 5. 应用配置并编译
           make -j$(nproc --all) O=out $MAKE_ARGS olddefconfig
-          # 验证配置是否生效（可选，用于调试）
-          grep -E "CONFIG_OPLUS_SENSOR_DEVINFO|CONFIG_QCOM_SMEM" out/.config
-          # 编译内核（降低并发数，避免GitHub Runner资源不足）
+          # 降低并发数，避免Runner资源不足
           make -j$(($(nproc --all) - 2)) O=out $MAKE_ARGS
           
           if [ -f "out/arch/arm64/boot/Image" ]; then
             cp out/arch/arm64/boot/Image $GITHUB_WORKSPACE/
           else
             echo "错误：未找到编译产物 Image"
-            exit 1
-          fi
-
-      - name: Package with AnyKernel3
-        run: |
-          git clone https://github.com/osm0sis/AnyKernel3 --depth=1
-          cp $GITHUB_WORKSPACE/Image AnyKernel3/
-          cd AnyKernel3
-          sed -i 's/device.name1=test/device.name1=oneplus12/' anykernel.sh
-          zip -r9 ../sukisu.zip * -x .git README.md
-
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ -f "sukisu.zip" ]; then
-            gh release create "$REL_NAME" --title "$REL_NAME" --notes "PixelOS Kernel Build with SukiSU" sukisu.zip
-          else
             exit 1
           fi
