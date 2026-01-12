@@ -31,7 +31,23 @@ jobs:
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 sm8550-modules
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
 
-          - name: 应用 SUSFS 内核补丁
+      - name: 集成 SukiSU-Ultra
+        working-directory: sm8550
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+
+      - name: 注入内核配置 (KSU/SUSFS/KPM)
+        working-directory: sm8550
+        run: |
+          CONF="arch/arm64/configs/vendor/kalama_GKI.config"
+          echo "CONFIG_KSU=y" >> $CONF
+          echo "CONFIG_KSU_SUSFS=y" >> $CONF
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $CONF
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $CONF
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $CONF
+          echo "CONFIG_KPM=y" >> $CONF
+
+      - name: 应用 SUSFS 内核补丁
         run: |
           cd sm8550
           # 1. 拷贝 SUSFS 核心组件到内核源码树 
@@ -51,22 +67,6 @@ jobs:
             echo "❌ 未找到 5.15 补丁文件，尝试搜索替代补丁..."
             find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" -exec patch -p1 < {} \;
           fi
-
-      - name: 集成 SukiSU-Ultra
-        working-directory: sm8550
-        run: |
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
-
-      - name: 注入内核配置 (KSU/SUSFS/KPM)
-        working-directory: sm8550
-        run: |
-          CONF="arch/arm64/configs/vendor/kalama_GKI.config"
-          echo "CONFIG_KSU=y" >> $CONF
-          echo "CONFIG_KSU_SUSFS=y" >> $CONF
-          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> $CONF
-          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> $CONF
-          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> $CONF
-          echo "CONFIG_KPM=y" >> $CONF
 
       - name: 执行内核编译
         working-directory: sm8550
