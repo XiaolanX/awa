@@ -29,7 +29,7 @@ jobs:
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550.git --depth=1 -b sixteen-qpr1 sm8550
           git clone https://github.com/OnePlus12R-development/android_kernel_oneplus_sm8550-modules.git --depth=1 -b sixteen-qpr1 sm8550-modules
           # 这里建议还是用 master，因为补丁最全
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b master
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android13-5.15
 
       - name: 集成 SukiSU-Ultra
         working-directory: sm8550
@@ -50,13 +50,9 @@ jobs:
       - name: 应用 SUSFS 内核补丁
         run: |
           cd sm8550
-          cp ../susfs4ksu/kernel_patches/fs/* ./fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
-          PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-          if [ -f "$PATCH_FILE" ]; then
-            patch -p1 < "$PATCH_FILE" || echo "Patch conflict ignored"
-          else
-            find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" -exec patch -p1 < {} \;
+          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch ./common/
+            cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
+            cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           fi
 
       - name: 强制修改内核 SUBLEVEL 为 196
