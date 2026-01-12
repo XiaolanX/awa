@@ -95,6 +95,13 @@ jobs:
             echo "❌ 编译失败，Image 未生成"
             exit 1
           fi
+          
+          - name: Pack AnyKernel3 (替代原 Mock 步骤)
+      run: |
+        # 这里你需要下载 AnyKernel3 并把 Image 塞进去
+        git clone https://github.com/osm0sis/AnyKernel3.git
+        cp $GITHUB_WORKSPACE/Image AnyKernel3/
+        cd AnyKernel3 && zip -r9 ../sukisu.zip * -x .git README.md
 
       - name: Create GitHub Release
         env:
