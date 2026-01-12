@@ -35,11 +35,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev ccache pahole python3 zip git wget
           
-          # 使用 Git Clone 获取 Clang 以绕过 Google Source 的 wget 400 错误
           mkdir -p $GITHUB_WORKSPACE/clang-tools
           git clone https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 -b main --depth=1 $GITHUB_WORKSPACE/clang-tools
           
-          # 自动定位 clang 可执行文件路径
           CLANG_BIN=$(find $GITHUB_WORKSPACE/clang-tools -name "clang" -type f | head -n 1 | xargs dirname)
           echo "CLANG_BIN=$CLANG_BIN" >> $GITHUB_ENV
 
@@ -62,14 +60,13 @@ jobs:
           
           if [ -d "./KernelSU" ]; then
             cd ./KernelSU
-            # 清理并修正 Kbuild 版本信息
             sed -i '/define get_ksu_version_full/,/endef/d' kernel/Kbuild
           else
             echo "SukiSU 安装失败"
             exit 1
           fi
 
-            - name: Build Kernel (FAST Mode)
+      - name: Build Kernel (FAST Mode)
         run: |
           export PATH="${{ env.CLANG_BIN }}:$PATH"
           export CC="ccache clang"
@@ -82,39 +79,26 @@ jobs:
           # 1. 生成配置
           make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
           
-          # 2. 修复 BTF 报错 (Invalid argument)
+          # 2. 修复 BTF 报错
           scripts/config --file out/.config -d DEBUG_INFO_BTF
           scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES
 
-          # 3. 终极解决：彻底消除 get_project/qcom_smem_alloc 符号引用（核心修改）
-          # 3.1 禁用所有oplus相关配置（兜底）
+          # 3. 彻底消除 get_project/qcom_smem_alloc 符号引用
           scripts/config --file out/.config -d CONFIG_OPLUS_SENSOR_DEVINFO
           scripts/config --file out/.config -d CONFIG_OPLUS_FEATURE_CHIP_SOC_INFO
           scripts/config --file out/.config -d CONFIG_OPLUS_CHIP_SOC_INFO
           scripts/config --file out/.config -d CONFIG_OPLUS_SOC_INFO
-          scripts/config --file out/.config -e CONFIG_QCOM_SMEM # 启用SMEM解决qcom_smem_alloc依赖
+          scripts/config --file out/.config -e CONFIG_QCOM_SMEM 
           
-          # 3.2 强制屏蔽oplus_sensor_devinfo.c的编译（适配不同Makefile格式）
-          # 方案A：直接删除该文件（最彻底）
+          # 3.2 强行屏蔽报错源码
           rm -f drivers/soc/oplus/sensor/oplus_sensor_devinfo.c
-          # 备用方案（如果不想删除文件）：注释Makefile中所有关联该行
-          # sed -i '/oplus_sensor_devinfo\.o/s/^/#/' drivers/soc/oplus/sensor/Makefile
           
-          # 3.3 兜底：如果文件没删干净，直接注释调用get_project的代码行（防止漏网）
-          if [ -f "drivers/soc/oplus/sensor/oplus_sensor_devinfo.c" ]; then
-            # 注释掉调用get_project的行（第151行）
-            sed -i '151s/^/\/\//' drivers/soc/oplus/sensor/oplus_sensor_devinfo.c
-            # 注释掉调用qcom_smem_alloc的行（第1463行）
-            sed -i '1463s/^/\/\//' drivers/soc/oplus/sensor/oplus_sensor_devinfo.c
-          fi
-          
-          # 4. 强制开启 Thin LTO 以适配 GitHub 环境
+          # 4. 强制开启 Thin LTO
           scripts/config --file out/.config -d LTO_CLANG_FULL
           scripts/config --file out/.config -e LTO_CLANG_THIN
           
           # 5. 应用配置并编译
           make -j$(nproc --all) O=out $MAKE_ARGS olddefconfig
-          # 降低并发数，避免Runner资源不足
           make -j$(($(nproc --all) - 2)) O=out $MAKE_ARGS
           
           if [ -f "out/arch/arm64/boot/Image" ]; then
