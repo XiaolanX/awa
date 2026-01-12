@@ -34,15 +34,7 @@ jobs:
       - name: 集成 SukiSU-Ultra
         working-directory: sm8550
         run: |
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-dev
-
-      - name: 应用 SUSFS 补丁
-        working-directory: sm8550
-        run: |
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android16-5.15.patch ./
-          cp ../susfs4ksu/kernel_patches/fs/* ./fs/
-          cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
-          patch -p1 < 50_add_susfs_in_gki-android16-5.15.patch || echo "Patch partially applied"
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
 
       - name: 注入内核配置 (KSU/SUSFS/KPM)
         working-directory: sm8550
