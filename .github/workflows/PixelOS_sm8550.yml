@@ -50,9 +50,20 @@ jobs:
       - name: 应用 SUSFS 内核补丁
         run: |
           cd sm8550
-          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch ./common/
-            cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
-            cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          # 确保目标文件夹存在（虽然内核源码肯定有，但稳一手）
+          mkdir -p fs include/linux
+          
+          # 拷贝文件
+          cp -f ../susfs4ksu/kernel_patches/fs/* ./fs/
+          cp -f ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+          
+          # 应用补丁
+          PATCH_FILE="../susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
+          if [ -f "$PATCH_FILE" ]; then
+            patch -p1 < "$PATCH_FILE"
+          else
+            echo "找不到指定补丁，尝试自动匹配..."
+            find ../susfs4ksu/kernel_patches/ -name "*5.15*.patch" -exec patch -p1 < {} \;
           fi
 
       - name: 强制修改内核 SUBLEVEL 为 196
